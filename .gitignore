@@ -3,3 +3,19 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 logs/*.jsonl
+.pytest_cache/
+logs/
+data/
+docs/
+!docs/
+docs/*
+!docs/reference/
+docs/reference/*
+!docs/reference/WORKING_TEST_ARMSDK_GOLDEN.md
+
+# Keep the current Golden reproduction report under version control.
+!docs/GOLDEN_ARMSDK_REPRODUCTION_REPORT.md
+!docs/GOLDEN_REAL_TEST_DIAGNOSTICS_REPORT.md
+!docs/GOLDEN_ARM_WARNING_POLICY.md
+!docs/GOLDEN_CONTROL_QUALITY_PROFILING.md
+!docs/GOLDEN_HOT_PATH_OPTIMIZATION_REPORT.md

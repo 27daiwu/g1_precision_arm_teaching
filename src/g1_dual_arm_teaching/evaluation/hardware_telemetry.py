@@ -21,7 +21,9 @@ class HardwareTelemetry:
         self.jump = 0.
         self.write(dict(event='configuration', backend='hardware' if client.real else 'simulation',
                         config=client.config, weight_target=client.weight_target,
-                        mode='ACQUIRE_HOLD_ONLY', limits_mode='CURRENT_POSE_ONLY'))
+                        mode='PHASE0_OFFICIAL_STYLE_HOLD', limits_mode='CURRENT_POSE_ONLY',
+                        ACQUIRE_STRATEGY='FULL_WEIGHT_CURRENT_POSE', ownership_weight=client.weight_target,
+                        control_gain=client.config['phase0_hold']))
 
     def write(self, row):
         self.stream.write(json.dumps(row, allow_nan=False) + '\n')
@@ -46,11 +48,13 @@ class HardwareTelemetry:
         if dt is not None:
             self.dts.append(dt)
         waist = [float(self.client.acquire_waist_q[i-12]) if i in active_waist(self.client.config) else None for i in (12, 13, 14)]
-        row = dict(timestamp=now, phase=phase, arm_sdk_weight=weight,
+        row = dict(timestamp=now, phase=phase, arm_sdk_weight=weight, ownership_weight=weight,
                    q_measured=state.q.tolist(), q_command=command.q.tolist(), dq_measured=state.dq.tolist(),
-                   error=error.tolist(), waist_q_measured=state.waist_q.tolist(), waist_q_command=waist,
+                   error=error.tolist(), waist_q_measured=state.waist_q.tolist(), waist_dq_measured=state.waist_dq.tolist(),
+                   waist_delta_q=(state.waist_q - self.client.acquire_waist_q).tolist(),
+                   waist_q_command=[None, None, None],
                    state_age=age, loop_dt=dt, acquire_q=self.origin.tolist(),
-                   WAIST_COMMAND_SENT=active_waist(self.client.config),
+                   WAIST_COMMAND_SENT=[],
                    WAIST_COMMAND_REQUIRED='UNKNOWN', WAIST_HOLD_BEHAVIOR='UNKNOWN')
         self.write(row)
 
@@ -83,6 +87,8 @@ class HardwareTelemetry:
                       HOLD_STABLE='UNKNOWN', RELEASE_STABLE='UNKNOWN', RELEASE_CAUSES_LARGE_TRANSIENT='UNKNOWN',
                       WAIST_COMMAND_REQUIRED='UNKNOWN', WAIST_HOLD_BEHAVIOR='UNKNOWN', TAU_FF=0,
                       REAL_TARGET_MOTION_EXECUTED='NO', WAYPOINT_EXECUTED='NO', READY_FOR_PHASE1_REAL_JOINT_MOTION='NO',
+                      FIRST_WRITE_DIAGNOSTICS=self.client.first_write_diagnostics,
+                      ACQUIRE_STRATEGY='FULL_WEIGHT_CURRENT_POSE',
                       ABORT_REASON=self.client._fault, BACKEND='hardware' if real else 'simulation',
                       **self.summary, **self.release)
         try:

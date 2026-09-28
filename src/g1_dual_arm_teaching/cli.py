@@ -26,39 +26,77 @@ def _input_worker(inbox):
 def main(mode, argv=None):
     parser = argparse.ArgumentParser(description=f'{mode}: default is simulation')
     parser.add_argument('--real', action='store_true')
+    parser.add_argument('--execute', action='store_true', help='explicit consent for hardware commands')
     parser.add_argument('--interface')
     parser.add_argument('--config-dir', default='configs')
     parser.add_argument('--exclusive-control-confirmed', action='store_true',
                         help='operator confirms Arm Action and ALL other streaming controllers are stopped')
-    parser.add_argument('--duration', type=float, default=5.0)
+    parser.add_argument('--duration', type=float, default=None)
     parser.add_argument('--log', help='new JSONL output path (must not exist)')
+    parser.add_argument('--dump-first-command', action='store_true', help='inspect final LowCmd/CDR without a publisher')
     if mode == 'acquire_hold':
+        parser.add_argument('--official-style', action='store_true', help='legacy experimental arm-only path')
+        parser.add_argument('--experimental-arm-only', action='store_true')
+        parser.add_argument('--golden', action='store_true', help='Golden upper-body hold (default)')
+        parser.add_argument('--hold-time', type=float)
         parser.add_argument('--acquire-hold-only', action='store_true')
         parser.add_argument('--weight', type=float)
-        parser.add_argument('--waist-mode', choices=['SEND_ACQUIRE_REFERENCE', 'ZERO_GAIN_NO_COMMAND'])
     if mode == 'demo':
         parser.add_argument('--waypoint-a', required=True)
         parser.add_argument('--waypoint-b', required=True)
     if mode == 'joint_hold':
         parser.add_argument('--interactive', action='store_true', help='hold while accepting waypoint paths, capture PATH, or quit')
     args = parser.parse_args(argv)
-    if not np.isfinite(args.duration) or args.duration < 0:
+    if mode == 'acquire_hold':
+        if args.hold_time is not None:
+            args.duration = args.hold_time
+        experimental = args.experimental_arm_only or args.official_style
+        if args.golden and experimental:
+            parser.error('--golden conflicts with experimental arm-only')
+        if args.weight is not None and not experimental:
+            parser.error('Golden weight curve is frozen; --weight is experimental only')
+        if args.real and not args.interface:
+            parser.error('--real requires an explicit --interface')
+    if args.duration is not None and (not np.isfinite(args.duration) or args.duration < 0):
         parser.error('--duration must be finite and non-negative')
-    if args.real and mode == 'acquire_hold' and not (args.interface and args.exclusive_control_confirmed and args.acquire_hold_only):
+    if args.dump_first_command and not args.real:
+        parser.error('--dump-first-command requires --real for actual SDK and lowstate')
+    if args.real and mode == 'acquire_hold' and experimental and args.execute and not args.dump_first_command and not (args.interface and args.exclusive_control_confirmed and args.acquire_hold_only):
         parser.error('real HOLD requires --interface, --exclusive-control-confirmed and --acquire-hold-only')
     logging.basicConfig(level=logging.INFO)
     recorder = None
     try:
         config = load_config(args.config_dir)
-        if mode == 'acquire_hold' and args.waist_mode:
-            config['waist']['experiment'] = args.waist_mode
+        if args.duration is None:
+            args.duration = config['phase0_hold']['duration_s'] if mode == 'acquire_hold' else 5.0
+        if mode == 'acquire_hold' and not experimental:
+            from .golden_cli import run_golden
+            return run_golden(args, config)
+        if mode == 'acquire_hold':
+            print('MODE = EXPERIMENTAL_ARM_ONLY_VARIANT')
+            print('ACQUIRE_STRATEGY = FULL_WEIGHT_CURRENT_POSE')
+            print('PHASE0_KP_15_28 =', config['phase0_hold']['kp'])
+            print('PHASE0_KD_15_28 =', config['phase0_hold']['kd'])
         # Validate input files before any DDS initialization.
         points = [WaypointStore.load(args.waypoint_a), WaypointStore.load(args.waypoint_b)] if mode == 'demo' else []
         with ArmSdkClient(config, real=args.real, network_interface=args.interface,
-                          read_only=mode in ('probe', 'audit'),
+                          read_only=args.dump_first_command or mode in ('probe', 'audit') or (args.real and not args.execute),
                           current_pose_only=mode == 'acquire_hold',
                           weight=args.weight if mode == 'acquire_hold' else None,
                           exclusive_control_confirmed=args.exclusive_control_confirmed) as client:
+            if args.dump_first_command or (args.real and not args.execute and mode not in ('probe', 'audit')):
+                from .utils.hardware import active_waist
+                state = client.wait_stable_state() if mode == 'acquire_hold' else client.get_joint_state()
+                command = client._command(state.q)
+                waist = state.waist_q if active_waist(config) else None
+                data = client.transport.dump_command(command, waist, 1.0 if mode == 'acquire_hold' else 0.0, state.q, official_style=mode == 'acquire_hold')
+                data['OWNERSHIP_WEIGHT'] = client.weight_target
+                path = Path(args.log or f'logs/first_command_{time.time_ns()}.json')
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open('x', encoding='utf-8') as stream:
+                    json.dump(data, stream, indent=2, allow_nan=False)
+                print(json.dumps(data, indent=2, allow_nan=False))
+                return 0 if data['WIRE_GUARD'] == 'PASS' and data.get('FIRST_WRITE_GUARD', 'PASS') == 'PASS' else 1
             if mode == 'audit':
                 from .hardware_audit import run_audit
                 run_audit(client, args.duration, args.log or f'logs/hardware_audit_{time.time_ns()}.jsonl')

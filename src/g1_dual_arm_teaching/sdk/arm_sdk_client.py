@@ -27,7 +27,15 @@ class ArmSdkClient:
         from ..utils.hardware import weight_target, validate_variant
         validate_variant(config)
         self.current_pose_only = current_pose_only
-        self.weight_target = weight_target(config['arm_sdk']['acquire_weight_target'] if weight is None else weight)
+        if current_pose_only:
+            from .phase0_acquire import validate_phase0
+            validate_phase0(config)
+            if weight is not None and weight != 1.0:
+                raise ValueError('Phase 0 partial weight is forbidden; ownership_weight must be 1.0')
+            self.weight_target = float(config['arm_sdk']['ownership_weight'])
+        else:
+            self.weight_target = weight_target(config['arm_sdk']['acquire_weight_target'] if weight is None else weight)
+        self.first_write_diagnostics = None
         self.telemetry = None
         self.phase = 'idle'
         self._last_publish_time = None
@@ -112,7 +120,25 @@ class ArmSdkClient:
                     raise ValueError('waist verified joint limit')
         if np.any(np.abs(state.waist_q) > self.config['limits']['sanity_abs_rad']):
             raise ValueError('waist sanity limit')
+        if self.current_pose_only and self.acquire_waist_q is not None and self._acquired:
+            self._check_waist_watchdog(state)
         return state
+
+    def _check_waist_watchdog(self, state):
+        settings = self.config['phase0_hold']['waist_watchdog']
+        if state.waist_dq is None:
+            raise RuntimeError('WAIST_SAFETY_ABORT: missing waist velocity')
+        delta = state.waist_q - self.acquire_waist_q
+        diagnostic = dict(WAIST_Q_AT_ACQUIRE=self.acquire_waist_q.tolist(),
+                          WAIST_Q_CURRENT=state.waist_q.tolist(),
+                          WAIST_DQ=state.waist_dq.tolist(), WAIST_DELTA_Q=delta.tolist())
+        if self.telemetry is not None:
+            self.telemetry.write(dict(event='waist_watchdog', timestamp=time.monotonic(), **diagnostic))
+        if (np.max(np.abs(delta)) > settings['max_abs_delta_rad'] or
+                np.max(np.abs(state.waist_dq)) > settings['max_abs_velocity_rad_s']):
+            LOG.error('WAIST_SAFETY_ABORT %s', diagnostic)
+            raise RuntimeError('WAIST_SAFETY_ABORT')
+        return diagnostic
 
     def wait_stable_state(self):
         settings = self.config['control']
@@ -134,18 +160,18 @@ class ArmSdkClient:
         raise TimeoutError('stable lowstate window not observed')
 
     def _command(self, q, dq=None):
-        return build_arm_command(q, dq, self.config['arm']['kp'], self.config['arm']['kd'])
+        gains = self.config['phase0_hold'] if self.current_pose_only else self.config['arm']
+        return build_arm_command(q, dq, gains['kp'], gains['kd'])
 
     def acquire(self, q_reference=None):
         if self.current_pose_only and q_reference is not None:
             raise ValueError('CURRENT_POSE_ONLY forbids supplied target/reference')
-        if self.current_pose_only:
-            self.wait_stable_state()
+        stable = self.wait_stable_state() if self.current_pose_only else None
         self.phase = 'acquire'
         with self._mutex:
             if self._fault or self._acquired or self.read_only:
                 raise RuntimeError('acquire not allowed')
-            state = self.get_joint_state()
+            state = stable if stable is not None else self.get_joint_state()
             if state.dq is not None and np.any(np.abs(state.dq) > self.guard.max_velocity_rad_s):
                 raise ValueError('measured velocity limit at acquire')
             if q_reference is not None and not np.array_equal(vector(q_reference, 14), state.q):
@@ -154,14 +180,28 @@ class ArmSdkClient:
             self.acquire_waist_q = state.waist_q.copy()
             self.acquire_q.flags.writeable = False
             self.acquire_waist_q.flags.writeable = False
+            if isinstance(self.transport, UnitreeTransport) and self.current_pose_only:
+                self.transport.acquire_reference = self.acquire_q.copy()
+                self.transport.acquire_reference.flags.writeable = False
             self._last = self._command(state.q)
             self._last_time = time.monotonic()
-            self._acquired = True
+            if self.current_pose_only and isinstance(self.transport, UnitreeTransport):
+                self.transport.first_write_check = self._check_first_wire
+            self._acquired = not self.current_pose_only
             try:
-                self._publish(self._last, 0.0)
+                if self.current_pose_only and not isinstance(self.transport, UnitreeTransport):
+                    wire = {f'WIRE_ARM_{name}': getattr(self._last, field).tolist()
+                            for name, field in [('Q','q'), ('DQ','dq'), ('KP','kp'), ('KD','kd'), ('TAU','tau_ff')]}
+                    wire['WIRE_WEIGHT'] = 1.0
+                    self._check_first_wire(wire)
+                self._publish(self._last, 1.0 if self.current_pose_only else 0.0)
+                self._acquired = True
             except BaseException:
                 self.abort('acquire DDS failure')
                 raise
+        if self.current_pose_only:
+            self.phase = 'hold'
+            return state
         loop = ControlLoop(self.config['control']['frequency_hz'])
         steps = max(1, int(np.ceil(self.config['control']['acquire_ramp_s'] / self.period_s)))
         try:
@@ -174,10 +214,21 @@ class ArmSdkClient:
         self.phase = "hold"
         return state
 
+    def _check_first_wire(self, wire):
+        from .phase0_acquire import first_write_diagnostics, require_first_write
+        latest = self.get_joint_state()
+        data = first_write_diagnostics(wire, self.acquire_q, latest, self.config)
+        self.first_write_diagnostics = data
+        LOG.info('FIRST_WRITE_DIAGNOSTICS %s', data)
+        if self.telemetry is not None:
+            self.telemetry.write(dict(event='first_write_diagnostics', **data))
+        require_first_write(data)
+
     def _publish(self, command, weight):
-        from ..utils.hardware import active_waist
-        waist = self.acquire_waist_q if active_waist(self.config) else None
-        self.transport.write(command, waist, weight)
+        # V1 matches the arm-only Golden Reference: waist slots retain SDK defaults.
+        self.transport.write(command, None, weight)
+        if self.current_pose_only and self.phase == 'acquire':
+            self._acquired = True
         now = time.monotonic()
         dt = None if self._last_publish_time is None else now - self._last_publish_time
         self._last, self._weight, self._last_time = command, weight, now
@@ -195,6 +246,8 @@ class ArmSdkClient:
                 command = self.guard.command(command, self._last.q, self.get_joint_state(),
                                              self._last_time, self.period_s)
                 value = self._weight if weight is None else float(weight)
+                if self.current_pose_only and self.phase != 'release' and value != 1.0:
+                    raise ValueError('Phase 0 ownership weight must remain 1 during HOLD')
                 if not np.isfinite(value) or not 0 <= value <= self.weight_target:
                     raise ValueError('invalid SDK weight')
                 self._publish(command, value)
@@ -280,6 +333,10 @@ class ArmSdkClient:
         return self.initialize()
 
     def __exit__(self, kind, value, traceback):
+        if kind is KeyboardInterrupt:
+            # Match the Golden Reference: operator stop uses the normal smooth release.
+            self.shutdown()
+            return False
         if kind is not None:
             self.abort(str(value))
         self.shutdown()

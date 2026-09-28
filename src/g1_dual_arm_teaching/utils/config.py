@@ -26,8 +26,8 @@ def load_config(directory):
         raise ValueError('only G1 14-arm-joint rt/arm_sdk is supported')
     if r['waist_joint_indices'] != [12, 13, 14]:
         raise ValueError('invalid waist indices')
-    if a['tau_ff_enabled'] is not False or w['mode'] != 'HOLD_AT_ACQUIRE_POSE':
-        raise ValueError('Phase 0/1 requires zero feedforward and acquired waist hold')
+    if a['tau_ff_enabled'] is not False or w['mode'] != 'MONITOR_ONLY':
+        raise ValueError('Phase 0 requires zero feedforward and monitor-only waist')
     if config['trajectory']['interpolation'] != 'smoothstep':
         raise ValueError('only smoothstep is implemented')
     for key in ('frequency_hz', 'acquire_ramp_s', 'release_ramp_s', 'initial_state_timeout_s'):
@@ -46,12 +46,14 @@ def load_config(directory):
     positive(config['trajectory']['default_duration_s'], 'default duration')
     if not isinstance(r['hardware_reviewed'], bool):
         raise ValueError('hardware_reviewed must be boolean')
-    if not isinstance(w['send_commands'], bool):
-        raise ValueError('send_commands must be boolean')
+    if w['send_commands'] is not False or w['experiment'] != 'ZERO_GAIN_NO_COMMAND':
+        raise ValueError('V1 waist command must remain disabled')
     from .hardware import validate_variant, weight_target
     validate_variant(config)
     weight_target(config["arm_sdk"]["acquire_weight_target"])
     for key in ("stable_state_s", "stable_position_span_rad", "stable_velocity_rad_s", "release_observe_s"):
         positive(c[key], key)
     positive(limits["sanity_abs_rad"], "sanity limit")
+    from ..sdk.phase0_acquire import validate_phase0
+    validate_phase0(config)
     return config

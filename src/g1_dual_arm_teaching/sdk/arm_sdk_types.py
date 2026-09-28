@@ -32,6 +32,7 @@ class JointState:
     timestamp: float
     dq: np.ndarray | None = None
     waist_q: np.ndarray | None = None
+    waist_dq: np.ndarray | None = None
 
     def __post_init__(self):
         self.q = vector(self.q, 14)
@@ -39,5 +40,7 @@ class JointState:
             self.dq = vector(self.dq, 14)
         if self.waist_q is not None:
             self.waist_q = vector(self.waist_q, 3)
+        if self.waist_dq is not None:
+            self.waist_dq = vector(self.waist_dq, 3)
         if not np.isfinite(self.timestamp):
             raise ValueError('invalid state timestamp')

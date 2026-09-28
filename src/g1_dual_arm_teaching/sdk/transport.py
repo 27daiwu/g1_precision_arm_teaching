@@ -1,8 +1,12 @@
 """DDS details stay in sdk/. Import Unitree only for explicit hardware use."""
 import time
+from contextlib import nullcontext
 import threading
+import json
+import logging
 import numpy as np
-from .arm_sdk_types import JointState
+from .arm_sdk_types import JointState, ArmJointCommand
+from .wire_audit import ARM_MOTOR_IDS, guard, compare, lowcmd_snapshot, snapshot_json
 
 
 class SimulationTransport:
@@ -16,7 +20,7 @@ class SimulationTransport:
         self.config = config
 
     def state(self):
-        return JointState(self.q, time.monotonic(), np.zeros(14), self.waist)
+        return JointState(self.q, time.monotonic(), np.zeros(14), self.waist, np.zeros(3))
 
     def write(self, command, waist, weight):
         if self.closed:
@@ -42,6 +46,11 @@ class UnitreeTransport:
         self._received_count = 0
         self._first_received = self._last_received = None
         self._mutex = threading.Lock()
+        self.acquire_reference = None
+        self.first_write_check = None
+        self._wire_sequence = 0
+        self._last_wire_weight = None
+        self.snapshots = []
 
     def initialize(self, config, interface, publisher):
         from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher, ChannelSubscriber
@@ -58,9 +67,10 @@ class UnitreeTransport:
 
     def _receive(self, message):
         try:
-            state = JointState([message.motor_state[i].q for i in range(15, 29)], time.monotonic(),
-                               [message.motor_state[i].dq for i in range(15, 29)],
-                               [message.motor_state[i].q for i in range(12, 15)])
+            state = JointState([message.motor_state[i].q for i in ARM_MOTOR_IDS], time.monotonic(),
+                               [message.motor_state[i].dq for i in ARM_MOTOR_IDS],
+                               [message.motor_state[i].q for i in range(12, 15)],
+                               [message.motor_state[i].dq for i in range(12, 15)])
             with self._mutex:
                 self._received_count += 1
                 if self._first_received is None:
@@ -73,13 +83,18 @@ class UnitreeTransport:
                 self._error = exc
 
     def state(self):
-        with self._mutex:
+        profiler = getattr(self, 'profiler', None)
+        with profiler.measure('state_lock') if profiler is not None else nullcontext():
+            self._mutex.acquire()
+        try:
             if self._error:
                 raise RuntimeError('invalid DDS state') from self._error
             if self._state is None:
                 return None
             s = self._state
-            return JointState(s.q, s.timestamp, s.dq, s.waist_q)
+            return JointState(s.q, s.timestamp, s.dq, s.waist_q, s.waist_dq)
+        finally:
+            self._mutex.release()
 
     def diagnostics(self):
         with self._mutex:
@@ -89,28 +104,74 @@ class UnitreeTransport:
                         LOWSTATE_FREQUENCY=(self._received_count - 1) / elapsed if elapsed > 0 else None,
                         LOWSTATE_SAMPLE_COUNT=self._received_count)
 
-    def write(self, command, waist, weight):
-        if self.publisher is None:
-            raise RuntimeError('read-only transport')
+    def build_message(self, command, waist, weight):
+        command = ArmJointCommand(command.q, command.dq, command.kp, command.kd, command.tau_ff)
+        if not np.isfinite(weight) or not 0 <= weight <= 1:
+            raise ValueError('invalid wire weight')
         message = self._message()
+        if len({id(m) for m in message.motor_cmd}) != len(message.motor_cmd):
+            raise ValueError('ABORT_BEFORE_DDS_WRITE: aliased motor slots')
         message.mode_pr = 0
-        message.mode_machine = self._mode_machine
-        for offset, index in enumerate(range(15, 29)):
+        # Experimental arm-only path leaves mode_machine at the SDK default.
+        for offset, index in enumerate(ARM_MOTOR_IDS):
             motor = message.motor_cmd[index]
             motor.q, motor.dq = float(command.q[offset]), float(command.dq[offset])
             motor.kp, motor.kd, motor.tau = float(command.kp[offset]), float(command.kd[offset]), 0.0
-        if waist is not None:
-            from ..utils.hardware import active_waist
-            for index in active_waist(self.config):
-                offset = index - 12
-                motor = message.motor_cmd[index]
-                motor.q, motor.dq, motor.tau = float(waist[offset]), 0.0, 0.0
-                motor.kp = float(self.config['waist']['kp'][offset])
-                motor.kd = float(self.config['waist']['kd'][offset])
+        # EXPERIMENTAL_ARM_ONLY_VARIANT. Motors 12..14 retain the exact SDK constructor defaults.
+        # The waist argument remains only for API compatibility and is intentionally ignored.
         message.motor_cmd[29].q = float(weight)
         message.crc = self._crc.Crc(message)
+        return message
+
+    def dump_command(self, command, waist, weight, acquire_q, official_style=False):
+        message = self.build_message(command, waist, weight)
+        data = compare(message, acquire_q)
+        decoded = type(message).deserialize(message.serialize())
+        data['CDR_ROUNDTRIP'] = compare(decoded, acquire_q)
+        if official_style:
+            from .phase0_acquire import first_write_diagnostics
+            data.update(first_write_diagnostics(guard(message, command, acquire_q), acquire_q, self.state(), self.config))
+        data['DDS_WRITE'] = 'NO'
+        data['COMMAND_PUBLISHER_CREATED'] = 'NO' if self.publisher is None else 'YES'
+        try:
+            guard(message, command, acquire_q)
+            guard(decoded, command, acquire_q)
+            data['WIRE_GUARD'] = 'PASS'
+        except ValueError as exc:
+            data['WIRE_GUARD'] = 'FAIL'
+            data['WIRE_GUARD_ERROR'] = str(exc)
+            data['ALL_ARM_WIRE_Q_MATCH_ACQUIRE'] = 'NO'
+        return data
+
+    def write(self, command, waist, weight):
+        if self.publisher is None:
+            raise RuntimeError('read-only transport')
+        message = self.build_message(command, waist, weight)
+        wire = guard(message, command, self.acquire_reference)
+        if hasattr(message, 'serialize'):
+            decoded = type(message).deserialize(message.serialize())
+            guard(decoded, command, self.acquire_reference)
+        if message.motor_cmd[29].q != float(weight):
+            raise ValueError('ABORT_BEFORE_DDS_WRITE: weight mismatch')
+        logging.getLogger(__name__).info('FINAL_WIRE_PAYLOAD %s', json.dumps(wire, allow_nan=False))
+        label = None
+        if self._wire_sequence == 0:
+            label = 'FIRST_FRAME'
+        elif self._last_wire_weight == 1.0 and float(weight) < 1.0:
+            label = 'RELEASE_FRAME'
+        elif self._wire_sequence == 1:
+            label = 'STEADY_STATE_FRAME'
+        if label is not None:
+            snapshot = lowcmd_snapshot(message, label, self._wire_sequence, time.monotonic())
+            self.snapshots.append(snapshot)
+            logging.getLogger(__name__).info('LOWCMD_SNAPSHOT %s', snapshot_json(snapshot))
+        if self.first_write_check is not None:
+            self.first_write_check(wire)
         if not self.publisher.Write(message):
             raise RuntimeError('DDS write failed')
+        self.first_write_check = None
+        self._last_wire_weight = float(weight)
+        self._wire_sequence += 1
 
     def close(self):
         try:

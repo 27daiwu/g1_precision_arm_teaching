@@ -40,9 +40,10 @@ arm:
   - 0.5
   - 0.5
   gain_profile: PHASE0_SAFE_BASELINE_GAIN
+# Legacy experimental arm-only settings below; Golden uses frozen 12..28 gains 40/1.5.
 waist:
-  mode: HOLD_AT_ACQUIRE_POSE
-  send_commands: true
+  mode: MONITOR_ONLY
+  send_commands: false
   kp:
   - 20
   - 20
@@ -51,7 +52,7 @@ waist:
   - 1
   - 1
   - 1
-  experiment: SEND_ACQUIRE_REFERENCE
+  experiment: ZERO_GAIN_NO_COMMAND
 trajectory:
   interpolation: smoothstep
   default_duration_s: 2.0
@@ -60,4 +61,17 @@ safety:
   command_timeout_s: 0.2
   max_joint_step_rad: 0.05
 arm_sdk:
+  ownership_weight: 1.0
+  # Legacy non-Phase-0 behavior only; never used by CURRENT_POSE_ONLY.
   acquire_weight_target: 0.1
+# Watchdog thresholds are shared; kp/kd apply only to EXPERIMENTAL_ARM_ONLY_VARIANT.
+phase0_hold:
+  # Existing manually configured baseline, unchanged; no adaptive gains.
+  kp: [20, 20, 20, 20, 10, 10, 10, 20, 20, 20, 20, 10, 10, 10]
+  kd: [1, 1, 1, 1, 0.5, 0.5, 0.5, 1, 1, 1, 1, 0.5, 0.5, 0.5]
+  # Initial value matches existing stable_position_span_rad; manually review.
+  pre_acquire_motion_threshold: 0.02
+  duration_s: 0.5
+  waist_watchdog:
+    max_abs_delta_rad: 0.05
+    max_abs_velocity_rad_s: 0.5

@@ -8,14 +8,17 @@ robot:
   - 12
   - 13
   - 14
-  hardware_reviewed: false
+  hardware_reviewed: true
   model: G1
   dof: 29
-  model_confirmed: false
-  arm_joint_mapping_verified: false
+  model_confirmed: true
+  arm_joint_mapping_verified: true
   ready_for_phase1_real_joint_motion: false
 waist:
-  configuration: UNKNOWN
-  configuration_verified: false
-  active_joints: []
+  configuration: ACTIVE_3DOF
+  configuration_verified: true
+  active_joints:
+  - 12
+  - 13
+  - 14
   locked_joints: []
