@@ -1,0 +1,11 @@
+# Simulation demonstration only; never treat as a safe robot HOME pose.
+name: point_001
+left_arm:
+  q: [0.02, 0, 0, 0, 0, 0, 0]
+right_arm:
+  q: [0.02, 0, 0, 0, 0, 0, 0]
+waist:
+  mode: HOLD_AT_ACQUIRE_POSE
+motion:
+  duration: 2.0
+  hold_time: 0.5

@@ -1,0 +1,21 @@
+robot:
+  name: g1
+  arm_sdk_topic: rt/arm_sdk
+  network_interface: eth0
+  domain_id: 0
+  arm_dof: 14
+  waist_joint_indices:
+  - 12
+  - 13
+  - 14
+  hardware_reviewed: false
+  model: G1
+  dof: 29
+  model_confirmed: false
+  arm_joint_mapping_verified: false
+  ready_for_phase1_real_joint_motion: false
+waist:
+  configuration: UNKNOWN
+  configuration_verified: false
+  active_joints: []
+  locked_joints: []

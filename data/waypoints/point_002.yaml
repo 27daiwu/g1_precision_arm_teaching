@@ -1,0 +1,11 @@
+# Simulation demonstration only.
+name: point_002
+left_arm:
+  q: [0, 0, 0, 0, 0, 0, 0]
+right_arm:
+  q: [0, 0, 0, 0, 0, 0, 0]
+waist:
+  mode: HOLD_AT_ACQUIRE_POSE
+motion:
+  duration: 2.0
+  hold_time: 0.5

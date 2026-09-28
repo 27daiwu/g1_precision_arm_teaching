@@ -1,0 +1,124 @@
+# q_min/q_max below are OFFLINE ONLY. They never authorize real motion.
+limits:
+  q_min:
+  - -3.14
+  - -3.14
+  - -3.14
+  - -3.14
+  - -3.14
+  - -3.14
+  - -3.14
+  - -3.14
+  - -3.14
+  - -3.14
+  - -3.14
+  - -3.14
+  - -3.14
+  - -3.14
+  q_max:
+  - 3.14
+  - 3.14
+  - 3.14
+  - 3.14
+  - 3.14
+  - 3.14
+  - 3.14
+  - 3.14
+  - 3.14
+  - 3.14
+  - 3.14
+  - 3.14
+  - 3.14
+  - 3.14
+  max_velocity_rad_s: 1.0
+  purpose: SANITY_ONLY_NOT_HARDWARE_LIMITS
+  sanity_abs_rad: 6.3
+metadata:
+  source: UNVERIFIED
+  hardware_verified: false
+joints:
+  left_shoulder_pitch:
+    motor_id: 15
+    min: null
+    max: null
+    verified: false
+  left_shoulder_roll:
+    motor_id: 16
+    min: null
+    max: null
+    verified: false
+  left_shoulder_yaw:
+    motor_id: 17
+    min: null
+    max: null
+    verified: false
+  left_elbow:
+    motor_id: 18
+    min: null
+    max: null
+    verified: false
+  left_wrist_roll:
+    motor_id: 19
+    min: null
+    max: null
+    verified: false
+  left_wrist_pitch:
+    motor_id: 20
+    min: null
+    max: null
+    verified: false
+  left_wrist_yaw:
+    motor_id: 21
+    min: null
+    max: null
+    verified: false
+  right_shoulder_pitch:
+    motor_id: 22
+    min: null
+    max: null
+    verified: false
+  right_shoulder_roll:
+    motor_id: 23
+    min: null
+    max: null
+    verified: false
+  right_shoulder_yaw:
+    motor_id: 24
+    min: null
+    max: null
+    verified: false
+  right_elbow:
+    motor_id: 25
+    min: null
+    max: null
+    verified: false
+  right_wrist_roll:
+    motor_id: 26
+    min: null
+    max: null
+    verified: false
+  right_wrist_pitch:
+    motor_id: 27
+    min: null
+    max: null
+    verified: false
+  right_wrist_yaw:
+    motor_id: 28
+    min: null
+    max: null
+    verified: false
+  waist_yaw:
+    motor_id: 12
+    min: null
+    max: null
+    verified: false
+  waist_roll:
+    motor_id: 13
+    min: null
+    max: null
+    verified: false
+  waist_pitch:
+    motor_id: 14
+    min: null
+    max: null
+    verified: false
