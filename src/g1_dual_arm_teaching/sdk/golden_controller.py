@@ -13,7 +13,7 @@ from .runtime_guard import RuntimeWireGuard
 class ArmSdkGoldenController:
     period_s = .02
 
-    def __init__(self, transport, config, *, clock=time.monotonic, sleep=time.sleep, emit=None, real_dds=False, motor14_kp=40., teach_waist=False, static_hold_waist_kp=None, static_hold_arm_kp=None, waist_kp_by_axis=None):
+    def __init__(self, transport, config, *, clock=time.monotonic, sleep=time.sleep, emit=None, real_dds=False, motor14_kp=40., teach_waist=False, static_hold_waist_kp=None, static_hold_arm_kp=None, waist_kp_by_axis=None, waist_pitch_hold_bias=0.):
         if motor14_kp not in (40., 50., 60.):
             raise ValueError('invalid diagnostic motor14 Kp')
         self.transport, self.config = transport, config
@@ -48,11 +48,15 @@ class ArmSdkGoldenController:
                 not all(np.isfinite(kp) and kp > 0 for kp in waist_kp_by_axis)):
             raise ValueError('invalid per-axis waist Kp')
         self.waist_kp_by_axis = None if waist_kp_by_axis is None else tuple(float(kp) for kp in waist_kp_by_axis)
+        if not np.isfinite(waist_pitch_hold_bias):
+            raise ValueError('invalid waist pitch hold bias')
+        self.waist_pitch_hold_bias = float(waist_pitch_hold_bias)
         self.selected_q = None
         self.representative_q = {}
         self.teach_q = None
         self.teach_kp = None
         self.representative_teach = {}
+        self.representative_bias_progress = {}
 
     def set_teach_command(self, q_arm, kp_arm):
         if self.weight != 1.:
@@ -118,6 +122,10 @@ class ArmSdkGoldenController:
                            acquire_q=None if self.q_hold is None else self.q_hold.tolist(),
                            max_abs_delta=self.max_delta.tolist(), max_abs_dq=self.max_velocity.tolist(),
                            arm_tracking_error=teach_tracking,
+                           motor14_acquire_q=None if self.q_hold is None else float(self.q_hold[2]),
+                           motor14_command_ref=None if self.runtime_guard is None else float(self.cmd.motor_cmd[14].q),
+                           motor14_current_q=float(q[2]),
+                           motor14_error_to_command_ref=None if self.runtime_guard is None else float(q[2]-self.cmd.motor_cmd[14].q),
                            motor_ids=list(range(12, 29))))
         if violations:
             raise SafetyAbort(violations[0]['abort_code'])
@@ -135,7 +143,8 @@ class ArmSdkGoldenController:
         self.runtime_guard = RuntimeWireGuard(self.defaults, self.q_hold, self.motor14_kp, teach_waist=self.teach_waist,
                                               static_hold_waist_kp=self.static_hold_waist_kp,
                                               static_hold_arm_kp=self.static_hold_arm_kp,
-                                              waist_kp_by_axis=self.waist_kp_by_axis)
+                                              waist_kp_by_axis=self.waist_kp_by_axis,
+                                              waist_pitch_hold_bias=self.waist_pitch_hold_bias)
         return self.q_hold.copy()
 
     @profiled('wire_guard')
@@ -153,6 +162,8 @@ class ArmSdkGoldenController:
                                  else self.static_hold_arm_kp if self.static_hold_arm_kp is not None and 15 <= i <= 28
                                  else None)
                     expected = dict(q=self.q_hold[i-12], dq=0., kp=static_kp if static_kp is not None else 60. if self.teach_waist and i in (12,13) else self.motor14_kp if i == 14 else 40., kd=1.5, tau=0.)[field]
+                    if i == 14 and field == 'q':
+                        expected += self.waist_pitch_hold_bias * self.runtime_guard.pitch_bias_progress
                     if i == 19 and field == 'q' and self.selected_q is not None:
                         expected = self.selected_q
                     if 15 <= i <= 28 and self.teach_q is not None and field == 'q':
@@ -210,12 +221,14 @@ class ArmSdkGoldenController:
         records = []
         selected_q = self.selected_q
         teach_q, teach_kp = self.teach_q, self.teach_kp
+        bias_progress = self.runtime_guard.pitch_bias_progress
         for label, message in self.representatives.items():
             weight = float(message.motor_cmd[29].q)
             self.selected_q = self.representative_q[label]
             self.runtime_guard.selected_q = self.selected_q
             self.teach_q, self.teach_kp = self.representative_teach[label]
             self.runtime_guard.teach_q, self.runtime_guard.teach_kp = self.teach_q, self.teach_kp
+            self.runtime_guard.pitch_bias_progress = self.representative_bias_progress[label]
             self.runtime_guard.check(message, weight)
             self._full_guard(message, weight)
             cdr = self._roundtrip(message, weight)
@@ -224,6 +237,7 @@ class ArmSdkGoldenController:
         self.runtime_guard.selected_q = selected_q
         self.teach_q, self.teach_kp = teach_q, teach_kp
         self.runtime_guard.teach_q, self.runtime_guard.teach_kp = teach_q, teach_kp
+        self.runtime_guard.pitch_bias_progress = bias_progress
         return dict(event='POST_RUN_FULL_WIRE_AUDIT', records=records,
                     result=('PASS' if all(r['crc_cdr']=='PASS' for r in records) else 'FIELDS_PASS_CDR_UNAVAILABLE') if records else 'NO_COMMAND_SNAPSHOTS')
 
@@ -231,6 +245,10 @@ class ArmSdkGoldenController:
     def _frame(self, weight, phase, publish=True, final=False, selected_q=None):
         self.phase = 'ACQUIRE' if phase in ('ACQUIRE', 'ACQUIRE_COMPLETE', 'FIRST_FRAME') else phase
         fill_golden_frame(self.cmd, self.q_hold, weight)
+        bias_progress = (weight if phase in ('ACQUIRE', 'FIRST_FRAME') else
+                         self.runtime_guard.pitch_bias_progress if phase == 'RELEASE' else 1.)
+        self.cmd.motor_cmd[14].q = float(self.q_hold[2] + self.waist_pitch_hold_bias * bias_progress)
+        self.runtime_guard.pitch_bias_progress = bias_progress
         self.cmd.motor_cmd[14].kp = self.motor14_kp
         if self.teach_waist:
             self.cmd.motor_cmd[12].kp = self.cmd.motor_cmd[13].kp = 60.
@@ -276,6 +294,7 @@ class ArmSdkGoldenController:
                 self.representative_q[label] = self.selected_q
                 self.representative_teach[label] = (None if self.teach_q is None else self.teach_q.copy(),
                                                       None if self.teach_kp is None else self.teach_kp.copy())
+                self.representative_bias_progress[label] = bias_progress
             snapshot = lowcmd_snapshot(self.cmd, phase, self.sequence, self.clock())
             snapshot.update(representative=label,
                             FIRST_COMMAND_GUARD='PASS' if self.sequence == 0 else None,

@@ -4,7 +4,8 @@ import math
 
 class RuntimeWireGuard:
     def __init__(self, defaults, reference, motor14_kp=40., teach_waist=False,
-                 static_hold_waist_kp=None, static_hold_arm_kp=None, waist_kp_by_axis=None):
+                 static_hold_waist_kp=None, static_hold_arm_kp=None, waist_kp_by_axis=None,
+                 waist_pitch_hold_bias=0.):
         if motor14_kp not in (40., 50., 60.):
             raise ValueError('GOLDEN_WIRE_GUARD invalid motor14 Kp')
         self.motor14_kp = float(motor14_kp)
@@ -12,6 +13,8 @@ class RuntimeWireGuard:
         self.static_hold_waist_kp = static_hold_waist_kp
         self.static_hold_arm_kp = static_hold_arm_kp
         self.waist_kp_by_axis = waist_kp_by_axis
+        self.waist_pitch_hold_bias = float(waist_pitch_hold_bias)
+        self.pitch_bias_progress = 0.
         self.teach_q = None
         self.teach_kp = None
         self.reference = tuple(float(q) for q in reference)
@@ -45,6 +48,8 @@ class RuntimeWireGuard:
         for i, fields in enumerate(self.expected):
             motor = motors[i]
             for name, expected in fields:
+                if i == 14 and name == 'q':
+                    expected += self.waist_pitch_hold_bias * self.pitch_bias_progress
                 if self.teach_q is not None and 15 <= i <= 28 and name == 'q':
                     expected = self.teach_q[i-15]
                 if self.teach_kp is not None and 15 <= i <= 28 and name == 'kp':

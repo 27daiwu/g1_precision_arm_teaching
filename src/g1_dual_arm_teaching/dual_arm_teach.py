@@ -1,6 +1,5 @@
 """Arm SDK bilateral joint teaching with explicit lock and waypoint capture."""
 import argparse
-import json
 from pathlib import Path
 import queue
 import signal
@@ -17,56 +16,39 @@ from .sdk.transport import UnitreeTransport
 from .utils.config import load_config
 
 
-MOVING_THRESHOLD = .05
-BREAKAWAY_DEBOUNCE_S = .05
 HOLD_GAIN_RAMP_S = .4
 ARM_IDS = tuple(range(15, 29))
-FINAL_KP = np.array([8. if i in (15, 16, 17, 18, 22, 23, 24, 25) else 6. for i in ARM_IDS])
+DRAG_KP = np.array([8. if i in (15, 16, 17, 18, 22, 23, 24, 25) else 6. for i in ARM_IDS])
+WAIST_KP = (80., 80., 120.)
+WAIST_PITCH_HOLD_BIAS = .010
 
 
-class TeachFollower:
-    """Per-joint velocity breakaway with explicit return to HOLDING."""
+class ArmTeachMode:
+    """Global arm mode changed only by explicit operator commands."""
     def __init__(self, q):
         self.reference = np.asarray(q, dtype=float).copy()
         if self.reference.shape != (14,) or not np.isfinite(self.reference).all():
             raise ValueError('invalid initial arm reference')
-        self.states = ['HOLDING'] * 14
-        self.state_since = [0.] * 14
-        self.transition_reason = ['TEACH_ENTRY'] * 14
-        self.candidate_since = [None] * 14
-        self.ramp_started = [None] * 14
+        self.mode = 'LOCKED'
+        self.ramp_started = None
         self.ramp_from = np.full(14, 40.)
         self.ramp_to = np.full(14, 40.)
 
-    def update(self, q, dq, now):
-        q, dq = np.asarray(q), np.asarray(dq)
-        if q.shape != (14,) or dq.shape != (14,) or not np.isfinite(q).all() or not np.isfinite(dq).all():
+    def update(self, q):
+        measured = np.asarray(q, dtype=float)
+        if measured.shape != (14,) or not np.isfinite(measured).all():
             raise ValueError('invalid arm state')
-        for i in range(14):
-            if self.state_since[i] == 0.:
-                self.state_since[i] = now
-            velocity = abs(float(dq[i]))
-            state = self.states[i]
-            breakaway = velocity > MOVING_THRESHOLD
-            if state == 'HOLDING' and breakaway:
-                if self.candidate_since[i] is None:
-                    self.candidate_since[i] = now
-                if now - self.candidate_since[i] >= BREAKAWAY_DEBOUNCE_S:
-                    current_kp = self.gains(now)[i]
-                    self.reference[i] = float(q[i])
-                    self.states[i] = 'MOVING'
-                    self.state_since[i] = now
-                    self.transition_reason[i] = 'VELOCITY'
-                    self.candidate_since[i] = None
-                    self.ramp_started[i] = now
-                    self.ramp_from[i] = current_kp
-                    self.ramp_to[i] = FINAL_KP[i]
-            elif state == 'MOVING':
-                self.candidate_since[i] = None
-            elif state == 'HOLDING':
-                self.candidate_since[i] = None
-            if self.states[i] == 'MOVING':
-                self.reference[i] = float(q[i])
+        if self.mode == 'DRAG':
+            self.reference = measured.copy()
+        return self.reference.copy()
+
+    def drag(self, q):
+        captured = np.asarray(q, dtype=float).copy()
+        if captured.shape != (14,) or not np.isfinite(captured).all():
+            raise ValueError('invalid arm capture')
+        self.reference = captured
+        self.mode = 'DRAG'
+        self.ramp_started = None
         return self.reference.copy()
 
     def lock(self, q, now):
@@ -75,25 +57,19 @@ class TeachFollower:
             raise ValueError('invalid arm capture')
         current_kp = self.gains(now)
         self.reference = captured
-        for i in range(14):
-            self.states[i] = 'HOLDING'
-            self.state_since[i] = now
-            self.transition_reason[i] = 'EXPLICIT_LOCK'
-            self.candidate_since[i] = None
-            self.ramp_started[i] = now
-            self.ramp_from[i] = current_kp[i]
-            self.ramp_to[i] = 40.
+        self.mode = 'LOCKED'
+        self.ramp_started = now
+        self.ramp_from = current_kp
+        self.ramp_to = np.full(14, 40.)
         return captured.copy()
 
     def gains(self, now):
-        values = np.empty(14)
-        for i in range(14):
-            if self.ramp_started[i] is None:
-                values[i] = 40.
-            else:
-                s = min(1., max(0., (now - self.ramp_started[i]) / HOLD_GAIN_RAMP_S))
-                values[i] = self.ramp_from[i] + (self.ramp_to[i] - self.ramp_from[i]) * (s*s*(3-2*s))
-        return values
+        if self.mode == 'DRAG':
+            return DRAG_KP.copy()
+        if self.ramp_started is None:
+            return np.full(14, 40.)
+        s = min(1., max(0., (now - self.ramp_started) / HOLD_GAIN_RAMP_S))
+        return self.ramp_from + (self.ramp_to - self.ramp_from) * (s*s*(3-2*s))
 
 
 def run_teach(controller, inbox):
@@ -107,28 +83,36 @@ def run_teach(controller, inbox):
         measured = controller._state()
         # Full ownership is held at Kp40; TEACH starts frozen at the measured pose.
         teach_entry_q = measured.q.copy()
-        follower = TeachFollower(teach_entry_q)
+        arm_mode = ArmTeachMode(teach_entry_q)
         controller.set_teach_command(teach_entry_q, np.full(14, 40.))
         controller.emit(dict(event='TEACH_READY', waist_q_start=controller.q_hold[:3].tolist(),
                              waist_kp=list(controller.waist_kp_by_axis) if controller.waist_kp_by_axis else controller.static_hold_waist_kp or 60.,
-                             shoulder_elbow_kp=8., wrist_kp=6., arm_kd=1.5,
+                             waist_pitch_hold_bias=controller.waist_pitch_hold_bias,
+                             motor14_command_ref=float(controller.q_hold[2]+controller.waist_pitch_hold_bias),
+                             arm_mode='LOCKED', shoulder_elbow_kp=8., wrist_kp=6., arm_kd=1.5,
                              arm_reference_at_entry=teach_entry_q.tolist()))
         waist_label = controller.waist_kp_by_axis or (controller.static_hold_waist_kp or 60.,)*3
-        print(f'DUAL ARM TEACH MODE\nWAIST: 12..14 HOLD / Kp{waist_label}\nARMS: shoulder/elbow Kp8, wrist Kp6, Kd1.5\n'
-              'M = lock and save waypoint; L = list count; Q = finish and release', flush=True)
-        last_follower_log = controller.clock() - .2
+        print(f'DUAL ARM TEACH MODE\nWAIST: 12..14 HOLD / Kp{waist_label}, Kd1.5, motor14 pitch bias = +0.010 rad\n'
+              'ARMS: LOCKED Kp40; DRAG shoulder/elbow Kp8, wrist Kp6; Kd1.5\n'
+              'F = drag; M = lock and save waypoint; L = list count; Q = finish and release', flush=True)
+        last_mode_log = controller.clock() - .2
         while True:
             now = controller.clock()
             state = controller._state()
-            reference = follower.update(state.q, state.dq, now)
+            reference = arm_mode.update(state.q)
             finish = False
             while True:
                 try:
                     action = inbox.get_nowait().strip().lower()
                 except queue.Empty:
                     break
-                if action in ('m', 'mark'):
-                    captured = follower.lock(state.q, now)
+                if action in ('f', 'free', 'drag'):
+                    reference = arm_mode.drag(state.q)
+                    controller.emit(dict(event='ARM_TEACH_MODE', timestamp=now, mode='DRAG'))
+                    print('[DRAG]\narms: shoulder/elbow Kp8, wrist Kp6\n'
+                          'waist: Kp80/80/120, reference unchanged', flush=True)
+                elif action in ('m', 'mark'):
+                    captured = arm_mode.lock(state.q, now)
                     reference = captured.copy()
                     point = dict(event='JOINT_WAYPOINT_MARK', index=len(waypoints)+1,
                                  timestamp=now, motor_ids=list(ARM_IDS),
@@ -136,26 +120,24 @@ def run_teach(controller, inbox):
                                  reference_measurement_error=[0.] * 14, units='rad')
                     waypoints.append(point)
                     controller.emit(point)
+                    controller.emit(dict(event='ARM_TEACH_MODE', timestamp=now, mode='LOCKED'))
                     print(f'[WAYPOINT {len(waypoints)}] LOCK + SAVE\ncaptured arm q: {captured.tolist()}\n'
-                          'all arm joints -> HOLDING; gain ramp -> Kp40', flush=True)
+                          'all arm joints -> LOCKED; gain ramp -> Kp40\n'
+                          '[LOCK] arms -> Kp40; waist -> Kp80/80/120', flush=True)
                 elif action in ('l', 'list'):
                     print(f'WAYPOINT_COUNT = {len(waypoints)}', flush=True)
                 elif action in ('q', 'quit', 'exit'):
                     finish = True
                     break
-            kp = follower.gains(now)
+            kp = arm_mode.gains(now)
             controller.set_teach_command(reference, kp)
             controller._frame(1., 'TEACH')
-            if now - last_follower_log >= .2:
-                last_follower_log = now
-                for i, motor_id in enumerate(ARM_IDS):
-                    controller.emit(dict(event='FOLLOWER_STATE', timestamp=now, motor_id=motor_id,
-                                         follower_state=follower.states[i], q_measured=float(state.q[i]),
-                                         q_reference=float(reference[i]), tracking_error=float(state.q[i]-reference[i]),
-                                         dq=float(state.dq[i]), kp_command=float(kp[i]),
-                                         state_age=float(now-follower.state_since[i]),
-                                         transition_reason=follower.transition_reason[i],
-                                         units=dict(q='rad', error='rad', dq='rad/s')))
+            if now - last_mode_log >= .2:
+                last_mode_log = now
+                controller.emit(dict(event='ARM_TEACH_STATE', timestamp=now, mode=arm_mode.mode,
+                                     motor_ids=list(ARM_IDS), q_measured=state.q.tolist(),
+                                     q_reference=reference.tolist(), kp_command=kp.tolist(),
+                                     units=dict(q='rad', dq='rad/s')))
             if finish:
                 return waypoints
             controller._profiled_sleep(controller.period_s)
@@ -207,7 +189,8 @@ def main(argv=None):
             transport.initialize(config, args.interface, True)
             controller = ArmSdkGoldenController(transport, config, emit=buffered.emit, real_dds=True,
                                                  motor14_kp=60., teach_waist=True,
-                                                 waist_kp_by_axis=(80., 80., 100.))
+                                                 waist_kp_by_axis=WAIST_KP,
+                                                 waist_pitch_hold_bias=WAIST_PITCH_HOLD_BIAS)
             for sig in (signal.SIGINT, signal.SIGTERM):
                 previous[sig] = signal.signal(sig, lambda signum, frame: controller.stop())
             inbox = queue.Queue()

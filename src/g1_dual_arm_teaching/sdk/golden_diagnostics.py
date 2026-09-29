@@ -86,10 +86,10 @@ class GoldenDiagnostics:
                     add('WAIST_DELTA', 'WAIST_DIAGNOSTIC_WARNING', i, waist['warning_abs_delta_rad'], vl)
                 if abs(delta[i]) > dl:
                     add('WAIST_DELTA', code, i, dl, vl)
-            elif not (phase == 'TEACH' and i >= 3):
+            elif phase != 'TEACH':
                 if abs(delta[i]) > dl:
                     add('ARM_DELTA', code, i, dl, vl)
-            if abs(dq[i]) > vl:
+            if abs(dq[i]) > vl and (i < 3 or phase != 'TEACH'):
                 add('VELOCITY', code, i, dl, vl)
         if first:
             dl = self.config['phase0_hold']['pre_acquire_motion_threshold']

@@ -3,12 +3,12 @@
 ## Overview
 
 Current Mainline: Dual-arm explicit lock + joint waypoint teaching MVP.
-人工拖动双臂、托住目标姿态，再按 `M` 锁定并记录 waypoint。
+按 `F` 进入双臂拖动模式，人工托住目标姿态，再按 `M` 锁定并记录 waypoint。
 
 ## Control Scope
 
 - 命令后端：Unitree Arm SDK `rt/arm_sdk`；实测状态：`rt/lowstate`。
-- motor12..14 保持接管时的腰部姿态；motor15..28 独立维护 HOLDING / MOVING 状态。
+- motor12..14 保持接管时的腰部姿态；motor15..28 统一使用 LOCKED / DRAG 模式。
 - motor29 用于 ownership weight；正式控制链不使用 UserCtrl。
 - Gravity compensation: DISABLED。所有下发的 `tau_ff = 0`。
 
@@ -18,21 +18,25 @@ Current Mainline: Dual-arm explicit lock + joint waypoint teaching MVP.
 | --- | --- | --- | --- |
 | motor12 waist_yaw | 80 | 1.5 | 接管时腰部 q |
 | motor13 waist_roll | 80 | 1.5 | 接管时腰部 q |
-| motor14 waist_pitch | 100 | 1.5 | 接管时腰部 q |
-| motor15..28 HOLDING | 40 | 1.5 | 锁定时捕获的 q |
-| 肩肘 MOVING | 8 | 1.5 | 每周期实测 q |
-| 手腕 MOVING | 6 | 1.5 | 每周期实测 q |
+| motor14 waist_pitch | 120 | 1.5 | 接管时腰部 q + 0.010 rad |
+| motor15..28 LOCKED | 40 | 1.5 | 锁定时捕获的 q |
+| 肩肘 DRAG | 8 | 1.5 | 每周期实测 q |
+| 手腕 DRAG | 6 | 1.5 | 每周期实测 q |
 
-HOLDING 关节在 `abs(dq) > 0.05 rad/s` 持续 0.05 s 后进入 MOVING。
-Position error does not trigger breakaway。MOVING 不会自动返回 HOLDING；其
-`q_ref = measured_q`，每个控制周期直接更新。
+启动后双臂处于 LOCKED。`F` 是进入 DRAG 的唯一方式；`M` 将双臂重新锁定。
+机器人运动、dq 和 position error 都不会自动切换模式。DRAG 中每个周期直接使用
+`q_ref = measured_q`。按 `F` 仅降低双臂阻抗，不释放 Arm SDK ownership。
+腰部 Kp80/80/120 贯穿 ACQUIRE、LOCKED、DRAG 和 RELEASE，直到 ownership
+weight 降为 0。motor14 的 +0.010 rad reference bias 随 2 s acquire smoothstep
+平滑进入，接管完成后在 HOLD、LOCKED、DRAG 和 RELEASE 中保持不变。
+motor12/13 reference 和腰部 safety 基准仍是启动时的 acquire q；F/M 不重新采样腰部。
 
 ## Teaching Workflow
 
-1. 启动程序，机器人接管当前姿态。
-2. 手动拖动需要调整的关节，将双臂托到目标姿态。
-3. 按 `M`。系统使用同一次 LowState capture 保存 motor15..28 waypoint、冻结双臂 reference，并将全部 arm joints 切换为 HOLDING；Kp 在 0.4 s 内通过 smoothstep 恢复至 40。
-4. 再次拖动进入下一姿态，重复按 `M`。
+1. 启动程序，机器人接管当前姿态，以 Kp40 进入 LOCKED。
+2. 按 `F` 进入双臂 DRAG，人工拖动并托住目标姿态。
+3. 按 `M`。系统使用同一次 LowState capture 保存 motor15..28 waypoint、冻结双臂 reference，并统一切换为 LOCKED；Kp 在 0.4 s 内通过 smoothstep 恢复至 40。
+4. 松手检查是否稳定保持。下一点再次按 `F`，拖动并按 `M`。
 5. 按 `L` 查看 waypoint 数量；按 `Q` 正常 release 并退出。
 
 ## Run on Robot
@@ -47,6 +51,7 @@ python scripts/dual_arm_teach.py eth0
 
 | 按键 | 操作 |
 | --- | --- |
+| `F` | 全部双臂关节进入低 Kp DRAG |
 | `M` | 锁定双臂并保存 waypoint |
 | `L` | 显示 waypoint 数量 |
 | `Q` | 正常释放并退出 |
@@ -79,4 +84,4 @@ python3 -m compileall -q src scripts tools tests
 
 - 无 gravity compensation、Cartesian IK 或 playback。
 - 腰部是阻抗保持，不是机械锁定。
-- MOVING 状态下的手臂需要人工托住后再按 `M`。
+- DRAG 状态下的手臂需要人工托住后再按 `M`。
