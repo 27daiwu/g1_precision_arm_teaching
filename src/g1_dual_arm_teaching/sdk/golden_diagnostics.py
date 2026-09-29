@@ -28,6 +28,10 @@ class GoldenDiagnostics:
         self.max_delta = np.zeros(17)
         self.max_dq = np.zeros(17)
         self.samples = 0
+        self.waist_warning_count = 0
+        self.waist_warning_first = None
+        self.waist_max_abs_delta = 0.
+        self.waist_max_abs_dq = 0.
 
     def inspect(self, state, q_hold, phase, weight, first):
         """Collect all conditions; only ARM_DELTA/VELOCITY use WARNING severity."""
@@ -42,7 +46,8 @@ class GoldenDiagnostics:
 
         def add(reason, code, i=None, delta_limit=None, velocity_limit=None, **extra):
             violations.append(dict(phase=phase, reason=reason, abort_code=code,
-                severity='WARNING' if code == 'ARM_DIAGNOSTIC_WARNING' else 'HARD',
+                severity='WARNING' if code in ('ARM_DIAGNOSTIC_WARNING',
+                                               'WAIST_DIAGNOSTIC_WARNING') else 'HARD',
                 timestamp=now,
                 motor_id=None if i is None else i+12,
                 joint_name=None if i is None else JOINT_NAMES[i],
@@ -74,8 +79,16 @@ class GoldenDiagnostics:
             dl = waist['max_abs_delta_rad'] if i < 3 else self.config['safety']['max_joint_step_rad']
             vl = waist['max_abs_velocity_rad_s'] if i < 3 else self.config['limits']['max_velocity_rad_s']
             code = 'WAIST_SAFETY_ABORT' if i < 3 else 'ARM_DIAGNOSTIC_WARNING'
-            if abs(delta[i]) > dl:
-                add('WAIST_DELTA' if i < 3 else 'ARM_DELTA', code, i, dl, vl)
+            if i < 3:
+                self.waist_max_abs_delta = max(self.waist_max_abs_delta, abs(float(delta[i])))
+                self.waist_max_abs_dq = max(self.waist_max_abs_dq, abs(float(dq[i])))
+                if abs(delta[i]) > waist['warning_abs_delta_rad']:
+                    add('WAIST_DELTA', 'WAIST_DIAGNOSTIC_WARNING', i, waist['warning_abs_delta_rad'], vl)
+                if abs(delta[i]) > dl:
+                    add('WAIST_DELTA', code, i, dl, vl)
+            elif not (phase == 'TEACH' and i >= 3):
+                if abs(delta[i]) > dl:
+                    add('ARM_DELTA', code, i, dl, vl)
             if abs(dq[i]) > vl:
                 add('VELOCITY', code, i, dl, vl)
         if first:
@@ -91,6 +104,10 @@ class GoldenDiagnostics:
     def warn(self, conditions):
         """Count every joint/reason sample, print and emit only the first per pair."""
         for condition in conditions:
+            if condition.get('abort_code') == 'WAIST_DIAGNOSTIC_WARNING':
+                self.waist_warning_count += 1
+                if self.waist_warning_first is None:
+                    self.waist_warning_first = dict(event='WAIST_WARNING_FIRST_TRIGGER', **condition)
             self.warning_count += 1
             key = (condition['motor_id'], condition['reason'])
             if key not in self.warnings:
@@ -106,6 +123,7 @@ class GoldenDiagnostics:
 
     def warning_summary(self):
         records = list(self.warnings.values())
+        waist = [r for r in records if r['first'].get('abort_code') == 'WAIST_DIAGNOSTIC_WARNING']
         first = records[0]['first'] if records else None
         return dict(warning_count=self.warning_count, unique_warning_count=len(records),
                     affected_motors=sorted({key[0] for key in self.warnings}),
@@ -115,7 +133,8 @@ class GoldenDiagnostics:
                     first_warning_weight=None if first is None else first['weight'],
                     first_warning_time=None if first is None else first['timestamp'],
                     first_warning_elapsed_time=None if first is None else first['elapsed_time'],
-                    warnings=records)
+                    waist_warning_count=sum(r['warning_count'] for r in waist),
+                    waist_warning_first=None if not waist else waist[0]['first'])
 
     def latch(self, violations):
         if not violations:
@@ -124,7 +143,9 @@ class GoldenDiagnostics:
         if self.first_trigger is None:
             self.first_trigger = dict(event='SAFETY_ABORT_FIRST_TRIGGER', latch_state='FIRST_TRIGGER',
                                       timestamp=self.clock(), violations=violations)
-            logging.error('%s triggered: SAFETY_ABORT_FIRST_TRIGGER %s', violations[0]['abort_code'], self.first_trigger)
+            logging.error('%s triggered: SAFETY_ABORT_FIRST_TRIGGER phase=%s motor=%s delta=%s',
+                          violations[0]['abort_code'], violations[0].get('phase'),
+                          violations[0].get('motor_id'), violations[0].get('delta_q'))
             self.emit(self.first_trigger)
 
     def record_other(self, exc, phase, weight):
@@ -182,6 +203,10 @@ class GoldenDiagnostics:
             first_trigger=self.first_trigger, abort_latched=self.first_trigger is not None,
             violation_samples=self.violation_samples, **capture,
             ARM_WARNING_SUMMARY=self.warning_summary(),
+            WAIST_WARNING_COUNT=self.waist_warning_count,
+            WAIST_WARNING_FIRST_TRIGGER=self.waist_warning_first,
+            WAIST_MAX_ABS_DELTA=self.waist_max_abs_delta,
+            WAIST_MAX_ABS_DQ=self.waist_max_abs_dq,
             DDS_COMMAND_TIMING=self._frequency(actual),
             DDS_COMMAND_TIMING_BY_PHASE={phase:self._frequency([w for w in actual if w['phase']==phase]) for phase in ('ACQUIRE','HOLD','RELEASE')},
             DDS_WRITE_FAILURES=sum(w['outcome']!='SUCCESS' and w['real_dds'] for w in self.writes),

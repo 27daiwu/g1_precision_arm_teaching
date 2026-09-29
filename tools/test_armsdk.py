@@ -248,6 +248,8 @@ class ArmSdkJointTester:
             # --------------------------------------------------
             # 2. Move selected joint
             # --------------------------------------------------
+            if getattr(self, 'diagnostics', None) is not None:
+                self.diagnostics.phase = 'MOVE'
             print("Moving joint...")
 
             start = time.monotonic()
@@ -280,6 +282,8 @@ class ArmSdkJointTester:
             # 3. Hold target
             # --------------------------------------------------
             if self.running and hold_time > 0:
+                if getattr(self, 'diagnostics', None) is not None:
+                    self.diagnostics.phase = 'HOLD'
                 print("Holding target...")
 
                 start = time.monotonic()
@@ -300,6 +304,8 @@ class ArmSdkJointTester:
             # 4. Return
             # --------------------------------------------------
             if self.running and return_to_start:
+                if getattr(self, 'diagnostics', None) is not None:
+                    self.diagnostics.phase = 'RETURN'
                 print("Returning to start pose...")
 
                 # Actual position at start of return.
@@ -407,6 +413,7 @@ def main():
         help="Show supported joints",
     )
 
+    parser.add_argument('--diagnostics-log', help='new JSONL file; buffered motor14/Write diagnostics only')
     args = parser.parse_args()
 
     if args.list_joints:
@@ -421,11 +428,25 @@ def main():
         print_joint_list()
         sys.exit(1)
 
+    diagnostics_stream = None
+    if args.diagnostics_log:
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+        from g1_dual_arm_teaching.sdk.reference_diagnostics import ReferenceDiagnostics
+        path = Path(args.diagnostics_log)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        diagnostics_stream = path.open('x', encoding='utf-8')
+
     tester = ArmSdkJointTester(
         interface=args.interface,
         kp=args.kp,
         kd=args.kd,
     )
+
+    observer = ReferenceDiagnostics(tester) if diagnostics_stream is not None else None
+    if observer is not None:
+        observer.parameters.update(joint=args.joint, offset=args.offset, move_time=args.move_time,
+                                   hold_time=args.hold_time, return_to_start=not args.no_return)
 
     def signal_handler(signum, frame):
         print("\nStop requested.")
@@ -442,13 +463,21 @@ def main():
 
     input("Press Enter to start...")
 
-    tester.move_joint_relative(
-        joint_name=args.joint,
-        offset=args.offset,
-        move_time=args.move_time,
-        hold_time=args.hold_time,
-        return_to_start=not args.no_return,
-    )
+    try:
+        tester.move_joint_relative(
+            joint_name=args.joint,
+            offset=args.offset,
+            move_time=args.move_time,
+            hold_time=args.hold_time,
+            return_to_start=not args.no_return,
+        )
+    finally:
+        if observer is not None:
+            try:
+                observer.finish(diagnostics_stream)
+            finally:
+                diagnostics_stream.close()
+
 
 
 if __name__ == "__main__":

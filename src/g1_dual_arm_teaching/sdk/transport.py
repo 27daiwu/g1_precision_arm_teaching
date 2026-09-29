@@ -51,8 +51,10 @@ class UnitreeTransport:
         self._wire_sequence = 0
         self._last_wire_weight = None
         self.snapshots = []
+        self._closed = threading.Event()
 
     def initialize(self, config, interface, publisher):
+        self._closed.clear()
         from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher, ChannelSubscriber
         from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_
         from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, LowState_
@@ -70,7 +72,8 @@ class UnitreeTransport:
             state = JointState([message.motor_state[i].q for i in ARM_MOTOR_IDS], time.monotonic(),
                                [message.motor_state[i].dq for i in ARM_MOTOR_IDS],
                                [message.motor_state[i].q for i in range(12, 15)],
-                               [message.motor_state[i].dq for i in range(12, 15)])
+                               [message.motor_state[i].dq for i in range(12, 15)],
+                               [message.motor_state[i].q for i in range(29)])
             with self._mutex:
                 self._received_count += 1
                 if self._first_received is None:
@@ -79,6 +82,9 @@ class UnitreeTransport:
                 self._state = state
                 self._mode_machine = message.mode_machine
         except Exception as exc:
+            if self._closed.is_set():
+                logging.getLogger(__name__).debug('READER_STOPPED: sample arrived during shutdown')
+                return
             with self._mutex:
                 self._error = exc
 
@@ -92,7 +98,7 @@ class UnitreeTransport:
             if self._state is None:
                 return None
             s = self._state
-            return JointState(s.q, s.timestamp, s.dq, s.waist_q, s.waist_dq)
+            return JointState(s.q, s.timestamp, s.dq, s.waist_q, s.waist_dq, s.full_q)
         finally:
             self._mutex.release()
 
@@ -174,6 +180,7 @@ class UnitreeTransport:
         self._wire_sequence += 1
 
     def close(self):
+        self._closed.set()
         try:
             if self.publisher is not None:
                 self.publisher.Close()
@@ -181,3 +188,8 @@ class UnitreeTransport:
             if self.subscriber is not None:
                 self.subscriber.Close()
             self.publisher = self.subscriber = None
+
+    def shutdown(self, timeout=1.0):
+        """Explicit bounded reader/publisher shutdown hook."""
+        self.close()
+        return True

@@ -1,4 +1,4 @@
-"""Frozen wire law from scripts/test_armsdk.py (motor12..28)."""
+"""Frozen wire law from tools/test_armsdk.py (motor12..28)."""
 import numpy as np
 from .wire_audit import lowcmd_snapshot
 from .arm_sdk_types import vector

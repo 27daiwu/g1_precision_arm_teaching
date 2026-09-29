@@ -134,6 +134,8 @@ class ArmSdkClient:
                           WAIST_DQ=state.waist_dq.tolist(), WAIST_DELTA_Q=delta.tolist())
         if self.telemetry is not None:
             self.telemetry.write(dict(event='waist_watchdog', timestamp=time.monotonic(), **diagnostic))
+        if np.max(np.abs(delta)) > settings['warning_abs_delta_rad']:
+            LOG.warning('WAIST_DIAGNOSTIC_WARNING %s', diagnostic)
         if (np.max(np.abs(delta)) > settings['max_abs_delta_rad'] or
                 np.max(np.abs(state.waist_dq)) > settings['max_abs_velocity_rad_s']):
             LOG.error('WAIST_SAFETY_ABORT %s', diagnostic)

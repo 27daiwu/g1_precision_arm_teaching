@@ -3,11 +3,15 @@ import math
 
 
 class RuntimeWireGuard:
-    def __init__(self, defaults, reference, motor14_kp=40., teach_waist=False):
+    def __init__(self, defaults, reference, motor14_kp=40., teach_waist=False,
+                 static_hold_waist_kp=None, static_hold_arm_kp=None, waist_kp_by_axis=None):
         if motor14_kp not in (40., 50., 60.):
             raise ValueError('GOLDEN_WIRE_GUARD invalid motor14 Kp')
         self.motor14_kp = float(motor14_kp)
         self.teach_waist = bool(teach_waist)
+        self.static_hold_waist_kp = static_hold_waist_kp
+        self.static_hold_arm_kp = static_hold_arm_kp
+        self.waist_kp_by_axis = waist_kp_by_axis
         self.teach_q = None
         self.teach_kp = None
         self.reference = tuple(float(q) for q in reference)
@@ -21,7 +25,12 @@ class RuntimeWireGuard:
                     continue
                 value = getattr(motor, name)
                 if 12 <= i <= 28:
-                    value = dict(q=self.reference[i-12], dq=0., kp=60. if self.teach_waist and i in (12,13) else self.motor14_kp if i == 14 else 40., kd=1.5, tau=0.).get(name, value)
+                    default_kp = (waist_kp_by_axis[i-12] if waist_kp_by_axis is not None and 12 <= i <= 14
+                                  else static_hold_waist_kp if static_hold_waist_kp is not None and i in (12, 13, 14)
+                                  else static_hold_arm_kp if static_hold_arm_kp is not None and 15 <= i <= 28
+                                  else 60. if self.teach_waist and i in (12,13)
+                                  else self.motor14_kp if i == 14 else 40.)
+                    value = dict(q=self.reference[i-12], dq=0., kp=default_kp, kd=1.5, tau=0.).get(name, value)
                 fields.append((name, float(value)))
             self.expected.append(tuple(fields))
         self.top = tuple((name, tuple(getattr(defaults, name)) if name=='reserve' else getattr(defaults, name))

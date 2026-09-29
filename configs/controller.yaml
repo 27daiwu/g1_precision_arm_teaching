@@ -73,5 +73,6 @@ phase0_hold:
   pre_acquire_motion_threshold: 0.02
   duration_s: 0.5
   waist_watchdog:
-    max_abs_delta_rad: 0.05
+    warning_abs_delta_rad: 0.05
+    max_abs_delta_rad: 0.08
     max_abs_velocity_rad_s: 0.5

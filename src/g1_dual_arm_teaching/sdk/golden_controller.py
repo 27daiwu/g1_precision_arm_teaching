@@ -13,7 +13,7 @@ from .runtime_guard import RuntimeWireGuard
 class ArmSdkGoldenController:
     period_s = .02
 
-    def __init__(self, transport, config, *, clock=time.monotonic, sleep=time.sleep, emit=None, real_dds=False, motor14_kp=40., teach_waist=False):
+    def __init__(self, transport, config, *, clock=time.monotonic, sleep=time.sleep, emit=None, real_dds=False, motor14_kp=40., teach_waist=False, static_hold_waist_kp=None, static_hold_arm_kp=None, waist_kp_by_axis=None):
         if motor14_kp not in (40., 50., 60.):
             raise ValueError('invalid diagnostic motor14 Kp')
         self.transport, self.config = transport, config
@@ -42,6 +42,12 @@ class ArmSdkGoldenController:
         self.guard_timings = []
         self.motor14_kp = float(motor14_kp)
         self.teach_waist = bool(teach_waist)
+        self.static_hold_waist_kp = static_hold_waist_kp
+        self.static_hold_arm_kp = static_hold_arm_kp
+        if waist_kp_by_axis is not None and (len(waist_kp_by_axis) != 3 or
+                not all(np.isfinite(kp) and kp > 0 for kp in waist_kp_by_axis)):
+            raise ValueError('invalid per-axis waist Kp')
+        self.waist_kp_by_axis = None if waist_kp_by_axis is None else tuple(float(kp) for kp in waist_kp_by_axis)
         self.selected_q = None
         self.representative_q = {}
         self.teach_q = None
@@ -101,6 +107,7 @@ class ArmSdkGoldenController:
             self.diagnostics.latch(violations)
             self.diagnostics.warn(warnings)
         if q is not None:
+            teach_tracking = None if self.phase != 'TEACH' or self.teach_q is None else (q[3:]-self.teach_q).tolist()
             self.motor14.observe(self.phase, q[2], dq[2], state.timestamp)
             self.max_delta = np.maximum(self.max_delta, np.abs(delta))
             self.max_velocity = np.maximum(self.max_velocity, np.abs(dq))
@@ -110,6 +117,7 @@ class ArmSdkGoldenController:
                            violations=violations, warnings=warnings, q=q.tolist(), dq=dq.tolist(), delta_q=delta.tolist(),
                            acquire_q=None if self.q_hold is None else self.q_hold.tolist(),
                            max_abs_delta=self.max_delta.tolist(), max_abs_dq=self.max_velocity.tolist(),
+                           arm_tracking_error=teach_tracking,
                            motor_ids=list(range(12, 29))))
         if violations:
             raise SafetyAbort(violations[0]['abort_code'])
@@ -124,7 +132,10 @@ class ArmSdkGoldenController:
         self.diagnostics.q_max = self.q_hold.copy()
         self.q_hold.setflags(write=False)
         self.motor14.capture(self.q_hold[2])
-        self.runtime_guard = RuntimeWireGuard(self.defaults, self.q_hold, self.motor14_kp, teach_waist=self.teach_waist)
+        self.runtime_guard = RuntimeWireGuard(self.defaults, self.q_hold, self.motor14_kp, teach_waist=self.teach_waist,
+                                              static_hold_waist_kp=self.static_hold_waist_kp,
+                                              static_hold_arm_kp=self.static_hold_arm_kp,
+                                              waist_kp_by_axis=self.waist_kp_by_axis)
         return self.q_hold.copy()
 
     @profiled('wire_guard')
@@ -137,7 +148,11 @@ class ArmSdkGoldenController:
                     continue
                 expected = getattr(default, field)
                 if 12 <= i <= 28 and field in ('q', 'dq', 'kp', 'kd', 'tau'):
-                    expected = dict(q=self.q_hold[i-12], dq=0., kp=60. if self.teach_waist and i in (12,13) else self.motor14_kp if i == 14 else 40., kd=1.5, tau=0.)[field]
+                    static_kp = (self.waist_kp_by_axis[i-12] if self.waist_kp_by_axis is not None and 12 <= i <= 14
+                                 else self.static_hold_waist_kp if self.static_hold_waist_kp is not None and i in (12, 13, 14)
+                                 else self.static_hold_arm_kp if self.static_hold_arm_kp is not None and 15 <= i <= 28
+                                 else None)
+                    expected = dict(q=self.q_hold[i-12], dq=0., kp=static_kp if static_kp is not None else 60. if self.teach_waist and i in (12,13) else self.motor14_kp if i == 14 else 40., kd=1.5, tau=0.)[field]
                     if i == 19 and field == 'q' and self.selected_q is not None:
                         expected = self.selected_q
                     if 15 <= i <= 28 and self.teach_q is not None and field == 'q':
@@ -219,6 +234,15 @@ class ArmSdkGoldenController:
         self.cmd.motor_cmd[14].kp = self.motor14_kp
         if self.teach_waist:
             self.cmd.motor_cmd[12].kp = self.cmd.motor_cmd[13].kp = 60.
+        if self.static_hold_waist_kp is not None:
+            for motor_id in (12, 13, 14):
+                self.cmd.motor_cmd[motor_id].kp = float(self.static_hold_waist_kp)
+        if self.waist_kp_by_axis is not None:
+            for offset, motor_id in enumerate((12, 13, 14)):
+                self.cmd.motor_cmd[motor_id].kp = self.waist_kp_by_axis[offset]
+        if self.static_hold_arm_kp is not None:
+            for motor_id in range(15, 29):
+                self.cmd.motor_cmd[motor_id].kp = float(self.static_hold_arm_kp)
         if selected_q is not None:
             if phase not in ('MOVE_TO_TARGET', 'TARGET_HOLD', 'RETURN_TO_START') or weight != 1. or self.weight != 1.:
                 raise ValueError('Phase 1 motor19 override requires full ownership and a motion phase')
