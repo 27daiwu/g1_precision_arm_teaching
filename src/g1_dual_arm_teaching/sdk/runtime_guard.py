@@ -3,7 +3,13 @@ import math
 
 
 class RuntimeWireGuard:
-    def __init__(self, defaults, reference):
+    def __init__(self, defaults, reference, motor14_kp=40., teach_waist=False):
+        if motor14_kp not in (40., 50., 60.):
+            raise ValueError('GOLDEN_WIRE_GUARD invalid motor14 Kp')
+        self.motor14_kp = float(motor14_kp)
+        self.teach_waist = bool(teach_waist)
+        self.teach_q = None
+        self.teach_kp = None
         self.reference = tuple(float(q) for q in reference)
         if len(self.reference) != 17 or not all(map(math.isfinite, self.reference)):
             raise ValueError('GOLDEN_WIRE_GUARD invalid captured reference')
@@ -15,7 +21,7 @@ class RuntimeWireGuard:
                     continue
                 value = getattr(motor, name)
                 if 12 <= i <= 28:
-                    value = dict(q=self.reference[i-12], dq=0., kp=40., kd=1.5, tau=0.).get(name, value)
+                    value = dict(q=self.reference[i-12], dq=0., kp=60. if self.teach_waist and i in (12,13) else self.motor14_kp if i == 14 else 40., kd=1.5, tau=0.).get(name, value)
                 fields.append((name, float(value)))
             self.expected.append(tuple(fields))
         self.top = tuple((name, tuple(getattr(defaults, name)) if name=='reserve' else getattr(defaults, name))
@@ -30,8 +36,14 @@ class RuntimeWireGuard:
         for i, fields in enumerate(self.expected):
             motor = motors[i]
             for name, expected in fields:
+                if self.teach_q is not None and 15 <= i <= 28 and name == 'q':
+                    expected = self.teach_q[i-15]
+                if self.teach_kp is not None and 15 <= i <= 28 and name == 'kp':
+                    expected = self.teach_kp[i-15]
                 if i == 29 and name == 'q':
                     expected = weight
+                elif i == 19 and name == 'q' and self.selected_q is not None:
+                    expected = self.selected_q
                 actual = getattr(motor, name)
                 if i == 29 and name == 'q' and (not math.isfinite(actual) or not 0 <= actual <= 1):
                     raise ValueError('GOLDEN_WIRE_GUARD motor29.q range')
@@ -44,3 +56,5 @@ class RuntimeWireGuard:
             actual = tuple(getattr(message, name)) if name=='reserve' else getattr(message, name)
             if actual != expected:
                 raise ValueError(f'GOLDEN_WIRE_GUARD {name}')
+
+    selected_q = None

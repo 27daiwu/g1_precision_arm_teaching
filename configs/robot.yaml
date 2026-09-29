@@ -13,7 +13,7 @@ robot:
   dof: 29
   model_confirmed: true
   arm_joint_mapping_verified: true
-  ready_for_phase1_real_joint_motion: false
+  ready_for_phase1_real_joint_motion: true
 waist:
   configuration: ACTIVE_3DOF
   configuration_verified: true

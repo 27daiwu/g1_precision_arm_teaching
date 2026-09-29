@@ -13,7 +13,9 @@ from .runtime_guard import RuntimeWireGuard
 class ArmSdkGoldenController:
     period_s = .02
 
-    def __init__(self, transport, config, *, clock=time.monotonic, sleep=time.sleep, emit=None, real_dds=False):
+    def __init__(self, transport, config, *, clock=time.monotonic, sleep=time.sleep, emit=None, real_dds=False, motor14_kp=40., teach_waist=False):
+        if motor14_kp not in (40., 50., 60.):
+            raise ValueError('invalid diagnostic motor14 Kp')
         self.transport, self.config = transport, config
         self.clock, self.sleep = clock, sleep
         self.profiler = CycleProfiler(clock)
@@ -38,6 +40,28 @@ class ArmSdkGoldenController:
         self.runtime_guard = None
         self.representatives = {}
         self.guard_timings = []
+        self.motor14_kp = float(motor14_kp)
+        self.teach_waist = bool(teach_waist)
+        self.selected_q = None
+        self.representative_q = {}
+        self.teach_q = None
+        self.teach_kp = None
+        self.representative_teach = {}
+
+    def set_teach_command(self, q_arm, kp_arm):
+        if self.weight != 1.:
+            raise ValueError('teach command requires full ownership')
+        q = np.asarray(q_arm, dtype=float)
+        kp = np.asarray(kp_arm, dtype=float)
+        if q.shape != (14,) or kp.shape != (14,) or not np.isfinite(q).all() or not np.isfinite(kp).all():
+            raise ValueError('invalid teach command')
+        expected = np.array([8. if i in (15,16,17,18,22,23,24,25) else 6. for i in range(15,29)])
+        if np.any(kp < expected) or np.any(kp > 40.):
+            raise ValueError('invalid teach gain ramp')
+        self.teach_q = q.copy()
+        self.teach_kp = kp.copy()
+        self.runtime_guard.teach_q = self.teach_q
+        self.runtime_guard.teach_kp = self.teach_kp
 
     @profiled('logging')
     def _profiled_emit(self, data):
@@ -100,7 +124,7 @@ class ArmSdkGoldenController:
         self.diagnostics.q_max = self.q_hold.copy()
         self.q_hold.setflags(write=False)
         self.motor14.capture(self.q_hold[2])
-        self.runtime_guard = RuntimeWireGuard(self.defaults, self.q_hold)
+        self.runtime_guard = RuntimeWireGuard(self.defaults, self.q_hold, self.motor14_kp, teach_waist=self.teach_waist)
         return self.q_hold.copy()
 
     @profiled('wire_guard')
@@ -113,7 +137,13 @@ class ArmSdkGoldenController:
                     continue
                 expected = getattr(default, field)
                 if 12 <= i <= 28 and field in ('q', 'dq', 'kp', 'kd', 'tau'):
-                    expected = dict(q=self.q_hold[i-12], dq=0., kp=40., kd=1.5, tau=0.)[field]
+                    expected = dict(q=self.q_hold[i-12], dq=0., kp=60. if self.teach_waist and i in (12,13) else self.motor14_kp if i == 14 else 40., kd=1.5, tau=0.)[field]
+                    if i == 19 and field == 'q' and self.selected_q is not None:
+                        expected = self.selected_q
+                    if 15 <= i <= 28 and self.teach_q is not None and field == 'q':
+                        expected = self.teach_q[i-15]
+                    if 15 <= i <= 28 and self.teach_kp is not None and field == 'kp':
+                        expected = self.teach_kp[i-15]
                 elif i == 29 and field == 'q':
                     expected = weight
                 if not np.allclose(getattr(motor, field), expected, rtol=0, atol=1e-6):
@@ -163,19 +193,45 @@ class ArmSdkGoldenController:
 
     def post_run_audit(self):
         records = []
+        selected_q = self.selected_q
+        teach_q, teach_kp = self.teach_q, self.teach_kp
         for label, message in self.representatives.items():
             weight = float(message.motor_cmd[29].q)
+            self.selected_q = self.representative_q[label]
+            self.runtime_guard.selected_q = self.selected_q
+            self.teach_q, self.teach_kp = self.representative_teach[label]
+            self.runtime_guard.teach_q, self.runtime_guard.teach_kp = self.teach_q, self.teach_kp
             self.runtime_guard.check(message, weight)
             self._full_guard(message, weight)
             cdr = self._roundtrip(message, weight)
             records.append(dict(label=label, fields='PASS', crc_cdr=cdr))
+        self.selected_q = selected_q
+        self.runtime_guard.selected_q = selected_q
+        self.teach_q, self.teach_kp = teach_q, teach_kp
+        self.runtime_guard.teach_q, self.runtime_guard.teach_kp = teach_q, teach_kp
         return dict(event='POST_RUN_FULL_WIRE_AUDIT', records=records,
                     result=('PASS' if all(r['crc_cdr']=='PASS' for r in records) else 'FIELDS_PASS_CDR_UNAVAILABLE') if records else 'NO_COMMAND_SNAPSHOTS')
 
     @profiled('prepare')
-    def _frame(self, weight, phase, publish=True, final=False):
+    def _frame(self, weight, phase, publish=True, final=False, selected_q=None):
         self.phase = 'ACQUIRE' if phase in ('ACQUIRE', 'ACQUIRE_COMPLETE', 'FIRST_FRAME') else phase
         fill_golden_frame(self.cmd, self.q_hold, weight)
+        self.cmd.motor_cmd[14].kp = self.motor14_kp
+        if self.teach_waist:
+            self.cmd.motor_cmd[12].kp = self.cmd.motor_cmd[13].kp = 60.
+        if selected_q is not None:
+            if phase not in ('MOVE_TO_TARGET', 'TARGET_HOLD', 'RETURN_TO_START') or weight != 1. or self.weight != 1.:
+                raise ValueError('Phase 1 motor19 override requires full ownership and a motion phase')
+            if not np.isfinite(selected_q):
+                raise ValueError('invalid selected joint command')
+            self.selected_q = float(selected_q)
+        if self.selected_q is not None:
+            self.cmd.motor_cmd[19].q = self.selected_q
+        if self.teach_q is not None:
+            for offset, motor_id in enumerate(range(15, 29)):
+                self.cmd.motor_cmd[motor_id].q = float(self.teach_q[offset])
+                self.cmd.motor_cmd[motor_id].kp = float(self.teach_kp[offset])
+        self.runtime_guard.selected_q = self.selected_q
         self._guard(self.cmd, weight)
         if self.sequence == 0:
             self._full_guard(self.cmd, weight)
@@ -193,6 +249,9 @@ class ArmSdkGoldenController:
             # At most seven independent snapshots; the live cmd remains persistent.
             with self.profiler.measure('allocation'):
                 self.representatives[label] = copy.deepcopy(self.cmd)
+                self.representative_q[label] = self.selected_q
+                self.representative_teach[label] = (None if self.teach_q is None else self.teach_q.copy(),
+                                                      None if self.teach_kp is None else self.teach_kp.copy())
             snapshot = lowcmd_snapshot(self.cmd, phase, self.sequence, self.clock())
             snapshot.update(representative=label,
                             FIRST_COMMAND_GUARD='PASS' if self.sequence == 0 else None,
