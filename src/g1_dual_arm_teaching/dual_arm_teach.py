@@ -1,5 +1,6 @@
 """Arm SDK bilateral joint teaching with explicit lock and waypoint capture."""
 import argparse
+from dataclasses import asdict
 from pathlib import Path
 import queue
 import signal
@@ -10,6 +11,7 @@ import time
 import numpy as np
 
 from .golden_cli import BufferedDiagnostics
+from .control.body_attitude_shadow import BodyAttitudeShadow
 from .sdk.golden_controller import ArmSdkGoldenController
 from .sdk.golden_diagnostics import SafetyAbort
 from .sdk.transport import UnitreeTransport
@@ -72,7 +74,7 @@ class ArmTeachMode:
         return self.ramp_from + (self.ramp_to - self.ramp_from) * (s*s*(3-2*s))
 
 
-def run_teach(controller, inbox):
+def run_teach(controller, inbox, *, body_attitude_shadow=False):
     waypoints = []
     started = controller.clock()
     shutdown_times = {}
@@ -81,6 +83,8 @@ def run_teach(controller, inbox):
         controller.acquire_current_pose()
         controller.hold_current_pose(.5)
         measured = controller._state()
+        shadow = BodyAttitudeShadow() if body_attitude_shadow else None
+        shadow_sample = shadow.update(measured) if shadow is not None else None
         # Full ownership is held at Kp40; TEACH starts frozen at the measured pose.
         teach_entry_q = measured.q.copy()
         arm_mode = ArmTeachMode(teach_entry_q)
@@ -91,6 +95,9 @@ def run_teach(controller, inbox):
                              motor14_command_ref=float(controller.q_hold[2]+controller.waist_pitch_hold_bias),
                              arm_mode='LOCKED', shoulder_elbow_kp=8., wrist_kp=6., arm_kd=1.5,
                              arm_reference_at_entry=teach_entry_q.tolist()))
+        if shadow_sample is not None:
+            controller.emit(dict(event='BODY_ATTITUDE_SHADOW_REFERENCE',
+                                 timestamp=measured.timestamp, **asdict(shadow_sample)))
         waist_label = controller.waist_kp_by_axis or (controller.static_hold_waist_kp or 60.,)*3
         print(f'DUAL ARM TEACH MODE\nWAIST: 12..14 HOLD / Kp{waist_label}, Kd1.5, motor14 pitch bias = +0.010 rad\n'
               'ARMS: LOCKED Kp40; DRAG shoulder/elbow Kp8, wrist Kp6; Kd1.5\n'
@@ -99,6 +106,7 @@ def run_teach(controller, inbox):
         while True:
             now = controller.clock()
             state = controller._state()
+            shadow_sample = shadow.update(state) if shadow is not None else None
             reference = arm_mode.update(state.q)
             finish = False
             while True:
@@ -138,6 +146,9 @@ def run_teach(controller, inbox):
                                      motor_ids=list(ARM_IDS), q_measured=state.q.tolist(),
                                      q_reference=reference.tolist(), kp_command=kp.tolist(),
                                      units=dict(q='rad', dq='rad/s')))
+                if shadow_sample is not None:
+                    controller.emit(dict(event='BODY_ATTITUDE_SHADOW_V1',
+                                         timestamp=state.timestamp, **asdict(shadow_sample)))
             if finish:
                 return waypoints
             controller._profiled_sleep(controller.period_s)
@@ -173,6 +184,8 @@ def _input_worker(inbox, stop_event):
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Dual arm kinesthetic teaching via rt/arm_sdk')
     parser.add_argument('interface')
+    parser.add_argument('--body-attitude-shadow', action='store_true',
+                        help='log observation-only torso attitude P candidates during TEACH')
     args = parser.parse_args(argv)
     config = load_config('configs')
     robot, waist = config['robot'], config['waist']
@@ -198,7 +211,7 @@ def main(argv=None):
             input_thread.start()
             exit_reason = None
             try:
-                run_teach(controller, inbox)
+                run_teach(controller, inbox, body_attitude_shadow=args.body_attitude_shadow)
             except SafetyAbort as exc:
                 exit_reason = 'SAFETY_ABORT'
                 print(f'SAFETY_ABORT = {exc}', flush=True)

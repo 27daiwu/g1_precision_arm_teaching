@@ -73,7 +73,8 @@ class UnitreeTransport:
                                [message.motor_state[i].dq for i in ARM_MOTOR_IDS],
                                [message.motor_state[i].q for i in range(12, 15)],
                                [message.motor_state[i].dq for i in range(12, 15)],
-                               [message.motor_state[i].q for i in range(29)])
+                               [message.motor_state[i].q for i in range(29)],
+                               list(message.imu_state.quaternion))
             with self._mutex:
                 self._received_count += 1
                 if self._first_received is None:
@@ -98,7 +99,8 @@ class UnitreeTransport:
             if self._state is None:
                 return None
             s = self._state
-            return JointState(s.q, s.timestamp, s.dq, s.waist_q, s.waist_dq, s.full_q)
+            return JointState(s.q, s.timestamp, s.dq, s.waist_q, s.waist_dq,
+                              s.full_q, s.imu_quaternion_wxyz)
         finally:
             self._mutex.release()
 

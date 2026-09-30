@@ -34,6 +34,7 @@ class JointState:
     waist_q: np.ndarray | None = None
     waist_dq: np.ndarray | None = None
     full_q: np.ndarray | None = None
+    imu_quaternion_wxyz: np.ndarray | None = None
 
     def __post_init__(self):
         self.q = vector(self.q, 14)
@@ -45,5 +46,10 @@ class JointState:
             self.waist_dq = vector(self.waist_dq, 3)
         if self.full_q is not None:
             self.full_q = vector(self.full_q, 29)
+        if self.imu_quaternion_wxyz is not None:
+            imu = np.asarray(self.imu_quaternion_wxyz, dtype=float)
+            if imu.shape != (4,):
+                raise ValueError('invalid IMU quaternion shape')
+            self.imu_quaternion_wxyz = imu.copy()
         if not np.isfinite(self.timestamp):
             raise ValueError('invalid state timestamp')
