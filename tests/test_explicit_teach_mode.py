@@ -200,3 +200,33 @@ def test_pitch_bias_ramps_with_acquire_and_persists_through_release():
         warning_abs_delta_rad=.05, max_abs_delta_rad=.08, max_abs_velocity_rad_s=.5)
     assert controller.post_run_audit()['result'] == 'FIELDS_PASS_CDR_UNAVAILABLE'
     assert controller.cmd.motor_cmd[29].q == 1.
+
+
+def test_body_attitude_correction_passes_wire_guards_and_release_audit():
+    config = load_config(Path(__file__).resolve().parents[1] / 'configs')
+    motor = lambda: SimpleNamespace(q=0., dq=0., kp=0., kd=0., tau=0., mode=0, reserve=0)
+    message = lambda: SimpleNamespace(motor_cmd=[motor() for _ in range(30)],
+                                      mode_pr=0, mode_machine=0, reserve=[], crc=0)
+    transport = SimpleNamespace(_message=message, _crc=SimpleNamespace(Crc=lambda cmd: 0),
+                                publisher=None, state=lambda: JointState(np.zeros(14), 1.,
+                                    np.zeros(14), np.array([.11, -.12, .13]), np.zeros(3)))
+    controller = ArmSdkGoldenController(transport, config, clock=lambda: 1.,
+        waist_kp_by_axis=WAIST_KP, teach_waist=True,
+        waist_pitch_hold_bias=WAIST_PITCH_HOLD_BIAS)
+    controller.q_hold = np.r_[np.array([.11, -.12, .13]), np.zeros(14)]
+    controller.runtime_guard = RuntimeWireGuard(controller.defaults, controller.q_hold,
+        controller.motor14_kp, teach_waist=True, waist_kp_by_axis=WAIST_KP,
+        waist_pitch_hold_bias=WAIST_PITCH_HOLD_BIAS)
+    controller.weight = 1.
+    controller.phase = 'HOLD'
+    controller.set_teach_command(np.zeros(14), np.full(14, 40.))
+    controller.set_body_attitude_correction(-.02, .03)
+    controller._frame(1., 'TEACH', publish=False)
+    assert controller.cmd.motor_cmd[13].q == pytest.approx(-.14)
+    assert controller.cmd.motor_cmd[14].q == pytest.approx(.17)
+    with pytest.raises(ValueError):
+        controller.set_body_attitude_correction(.051, 0.)
+    controller._frame(.5, 'RELEASE', publish=False)
+    assert controller.cmd.motor_cmd[13].q == pytest.approx(-.14)
+    assert controller.cmd.motor_cmd[14].q == pytest.approx(.17)
+    assert controller.post_run_audit()['result'] == 'FIELDS_PASS_CDR_UNAVAILABLE'

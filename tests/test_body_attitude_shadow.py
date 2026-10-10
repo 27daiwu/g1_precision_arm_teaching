@@ -44,6 +44,17 @@ def test_invalid_frame_does_not_advance_candidate():
 
 
 class ShadowFakeController(FakeController):
+    correction = (0., 0.)
+
+    def set_body_attitude_correction(self, roll, pitch):
+        self.correction = (roll, pitch)
+
+    def _frame(self, weight, phase):
+        super()._frame(weight, phase)
+        self.events.append(dict(event='TEST_WAIST_COMMAND',
+                                motor13_ref=self.q_hold[1] + self.correction[0],
+                                motor14_ref=self.q_hold[2] + self.waist_pitch_hold_bias + self.correction[1]))
+
     def _state(self):
         measured = super()._state()
         measured.timestamp = self.time
@@ -72,3 +83,18 @@ def test_teach_shadow_logs_without_changing_commands():
         assert {'torso_roll', 'torso_pitch', 'roll_ref', 'pitch_ref', 'roll_error',
                 'pitch_error', 'motor13_candidate', 'motor14_candidate',
                 'q12', 'q13', 'q14'} <= event.keys()
+
+
+def test_closed_loop_uses_acquire_references_and_preserves_arm_frames():
+    inbox = queue.Queue()
+    inbox.put('f')
+    controller = ShadowFakeController(inbox)
+    run_teach(controller, inbox, body_attitude_closed_loop=True)
+    logs = [event for event in controller.events if event['event'] == 'BODY_ATTITUDE_SHADOW_V1']
+    assert logs and all(event['closed_loop'] for event in logs)
+    assert all(event['motor13_command_ref'] == pytest.approx(controller.q_hold[1] + event['motor13_candidate'])
+               and event['motor14_command_ref'] == pytest.approx(controller.q_hold[2] + .010 + event['motor14_candidate'])
+               for event in logs)
+    assert all(abs(event['motor13_candidate']) <= .05 and abs(event['motor14_candidate']) <= .05
+               for event in logs)
+    assert len(controller.frames) == 3

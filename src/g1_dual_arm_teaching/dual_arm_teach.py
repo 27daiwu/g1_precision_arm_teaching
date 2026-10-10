@@ -74,7 +74,7 @@ class ArmTeachMode:
         return self.ramp_from + (self.ramp_to - self.ramp_from) * (s*s*(3-2*s))
 
 
-def run_teach(controller, inbox, *, body_attitude_shadow=False):
+def run_teach(controller, inbox, *, body_attitude_shadow=False, body_attitude_closed_loop=False):
     waypoints = []
     started = controller.clock()
     shutdown_times = {}
@@ -83,7 +83,7 @@ def run_teach(controller, inbox, *, body_attitude_shadow=False):
         controller.acquire_current_pose()
         controller.hold_current_pose(.5)
         measured = controller._state()
-        shadow = BodyAttitudeShadow() if body_attitude_shadow else None
+        shadow = BodyAttitudeShadow() if body_attitude_shadow or body_attitude_closed_loop else None
         shadow_sample = shadow.update(measured) if shadow is not None else None
         # Full ownership is held at Kp40; TEACH starts frozen at the measured pose.
         teach_entry_q = measured.q.copy()
@@ -139,6 +139,9 @@ def run_teach(controller, inbox, *, body_attitude_shadow=False):
                     break
             kp = arm_mode.gains(now)
             controller.set_teach_command(reference, kp)
+            if body_attitude_closed_loop:
+                controller.set_body_attitude_correction(shadow_sample.motor13_candidate,
+                                                        shadow_sample.motor14_candidate)
             controller._frame(1., 'TEACH')
             if now - last_mode_log >= .2:
                 last_mode_log = now
@@ -148,7 +151,10 @@ def run_teach(controller, inbox, *, body_attitude_shadow=False):
                                      units=dict(q='rad', dq='rad/s')))
                 if shadow_sample is not None:
                     controller.emit(dict(event='BODY_ATTITUDE_SHADOW_V1',
-                                         timestamp=state.timestamp, **asdict(shadow_sample)))
+                                         timestamp=state.timestamp, closed_loop=body_attitude_closed_loop,
+                                         motor13_command_ref=float(controller.q_hold[1] + shadow_sample.motor13_candidate) if body_attitude_closed_loop else None,
+                                         motor14_command_ref=float(controller.q_hold[2] + controller.waist_pitch_hold_bias + shadow_sample.motor14_candidate) if body_attitude_closed_loop else None,
+                                         **asdict(shadow_sample)))
             if finish:
                 return waypoints
             controller._profiled_sleep(controller.period_s)
@@ -186,6 +192,8 @@ def main(argv=None):
     parser.add_argument('interface')
     parser.add_argument('--body-attitude-shadow', action='store_true',
                         help='log observation-only torso attitude P candidates during TEACH')
+    parser.add_argument('--body-attitude-closed-loop', action='store_true',
+                        help='apply low-gain torso P correction to waist motors 13 and 14 during TEACH')
     args = parser.parse_args(argv)
     config = load_config('configs')
     robot, waist = config['robot'], config['waist']
@@ -211,7 +219,8 @@ def main(argv=None):
             input_thread.start()
             exit_reason = None
             try:
-                run_teach(controller, inbox, body_attitude_shadow=args.body_attitude_shadow)
+                run_teach(controller, inbox, body_attitude_shadow=args.body_attitude_shadow,
+                          body_attitude_closed_loop=args.body_attitude_closed_loop)
             except SafetyAbort as exc:
                 exit_reason = 'SAFETY_ABORT'
                 print(f'SAFETY_ABORT = {exc}', flush=True)
@@ -239,3 +248,7 @@ def main(argv=None):
                 transport.shutdown()
                 for sig, handler in previous.items():
                     signal.signal(sig, handler)
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

@@ -15,6 +15,7 @@ class RuntimeWireGuard:
         self.waist_kp_by_axis = waist_kp_by_axis
         self.waist_pitch_hold_bias = float(waist_pitch_hold_bias)
         self.pitch_bias_progress = 0.
+        self.body_attitude_correction = (0., 0.)
         self.teach_q = None
         self.teach_kp = None
         self.reference = tuple(float(q) for q in reference)
@@ -48,6 +49,8 @@ class RuntimeWireGuard:
         for i, fields in enumerate(self.expected):
             motor = motors[i]
             for name, expected in fields:
+                if i in (13, 14) and name == 'q':
+                    expected += self.body_attitude_correction[i-13]
                 if i == 14 and name == 'q':
                     expected += self.waist_pitch_hold_bias * self.pitch_bias_progress
                 if self.teach_q is not None and 15 <= i <= 28 and name == 'q':

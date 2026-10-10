@@ -57,6 +57,16 @@ class ArmSdkGoldenController:
         self.teach_kp = None
         self.representative_teach = {}
         self.representative_bias_progress = {}
+        self.body_attitude_correction = (0., 0.)
+        self.representative_body_correction = {}
+
+    def set_body_attitude_correction(self, roll, pitch):
+        if self.weight != 1. or self.phase not in ('HOLD', 'TEACH'):
+            raise ValueError('body attitude correction requires TEACH ownership')
+        values = (float(roll), float(pitch))
+        if not all(np.isfinite(value) and abs(value) <= .05 + 1e-12 for value in values):
+            raise ValueError('body attitude correction exceeds clamp')
+        self.body_attitude_correction = values
 
     def set_teach_command(self, q_arm, kp_arm):
         if self.weight != 1.:
@@ -164,6 +174,8 @@ class ArmSdkGoldenController:
                     expected = dict(q=self.q_hold[i-12], dq=0., kp=static_kp if static_kp is not None else 60. if self.teach_waist and i in (12,13) else self.motor14_kp if i == 14 else 40., kd=1.5, tau=0.)[field]
                     if i == 14 and field == 'q':
                         expected += self.waist_pitch_hold_bias * self.runtime_guard.pitch_bias_progress
+                    if i in (13, 14) and field == 'q':
+                        expected += self.body_attitude_correction[i-13]
                     if i == 19 and field == 'q' and self.selected_q is not None:
                         expected = self.selected_q
                     if 15 <= i <= 28 and self.teach_q is not None and field == 'q':
@@ -222,6 +234,7 @@ class ArmSdkGoldenController:
         selected_q = self.selected_q
         teach_q, teach_kp = self.teach_q, self.teach_kp
         bias_progress = self.runtime_guard.pitch_bias_progress
+        body_correction = self.body_attitude_correction
         for label, message in self.representatives.items():
             weight = float(message.motor_cmd[29].q)
             self.selected_q = self.representative_q[label]
@@ -229,6 +242,8 @@ class ArmSdkGoldenController:
             self.teach_q, self.teach_kp = self.representative_teach[label]
             self.runtime_guard.teach_q, self.runtime_guard.teach_kp = self.teach_q, self.teach_kp
             self.runtime_guard.pitch_bias_progress = self.representative_bias_progress[label]
+            self.body_attitude_correction = self.representative_body_correction[label]
+            self.runtime_guard.body_attitude_correction = self.body_attitude_correction
             self.runtime_guard.check(message, weight)
             self._full_guard(message, weight)
             cdr = self._roundtrip(message, weight)
@@ -238,6 +253,8 @@ class ArmSdkGoldenController:
         self.teach_q, self.teach_kp = teach_q, teach_kp
         self.runtime_guard.teach_q, self.runtime_guard.teach_kp = teach_q, teach_kp
         self.runtime_guard.pitch_bias_progress = bias_progress
+        self.body_attitude_correction = body_correction
+        self.runtime_guard.body_attitude_correction = body_correction
         return dict(event='POST_RUN_FULL_WIRE_AUDIT', records=records,
                     result=('PASS' if all(r['crc_cdr']=='PASS' for r in records) else 'FIELDS_PASS_CDR_UNAVAILABLE') if records else 'NO_COMMAND_SNAPSHOTS')
 
@@ -248,7 +265,10 @@ class ArmSdkGoldenController:
         bias_progress = (weight if phase in ('ACQUIRE', 'FIRST_FRAME') else
                          self.runtime_guard.pitch_bias_progress if phase == 'RELEASE' else 1.)
         self.cmd.motor_cmd[14].q = float(self.q_hold[2] + self.waist_pitch_hold_bias * bias_progress)
+        self.cmd.motor_cmd[13].q = float(self.q_hold[1] + self.body_attitude_correction[0])
+        self.cmd.motor_cmd[14].q += self.body_attitude_correction[1]
         self.runtime_guard.pitch_bias_progress = bias_progress
+        self.runtime_guard.body_attitude_correction = self.body_attitude_correction
         self.cmd.motor_cmd[14].kp = self.motor14_kp
         if self.teach_waist:
             self.cmd.motor_cmd[12].kp = self.cmd.motor_cmd[13].kp = 60.
@@ -295,6 +315,7 @@ class ArmSdkGoldenController:
                 self.representative_teach[label] = (None if self.teach_q is None else self.teach_q.copy(),
                                                       None if self.teach_kp is None else self.teach_kp.copy())
                 self.representative_bias_progress[label] = bias_progress
+                self.representative_body_correction[label] = self.body_attitude_correction
             snapshot = lowcmd_snapshot(self.cmd, phase, self.sequence, self.clock())
             snapshot.update(representative=label,
                             FIRST_COMMAND_GUARD='PASS' if self.sequence == 0 else None,
