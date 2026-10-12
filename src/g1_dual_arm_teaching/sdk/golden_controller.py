@@ -58,6 +58,7 @@ class ArmSdkGoldenController:
         self.representative_teach = {}
         self.representative_bias_progress = {}
         self.body_attitude_correction = (0., 0.)
+        self.body_attitude_audit = None
         self.representative_body_correction = {}
 
     def set_body_attitude_correction(self, roll, pitch):
@@ -132,6 +133,8 @@ class ArmSdkGoldenController:
                            acquire_q=None if self.q_hold is None else self.q_hold.tolist(),
                            max_abs_delta=self.max_delta.tolist(), max_abs_dq=self.max_velocity.tolist(),
                            arm_tracking_error=teach_tracking,
+                           command_sequence=self.sequence,
+                           motor13_command_ref=None if self.runtime_guard is None else float(self.cmd.motor_cmd[13].q),
                            motor14_acquire_q=None if self.q_hold is None else float(self.q_hold[2]),
                            motor14_command_ref=None if self.runtime_guard is None else float(self.cmd.motor_cmd[14].q),
                            motor14_current_q=float(q[2]),
@@ -336,7 +339,13 @@ class ArmSdkGoldenController:
             self.attempted_write = True
             self.weight = weight
             record = dict(event='DDS_WRITE_RESULT', sequence=self.sequence, phase=phase,
-                          real_dds=self.diagnostics.real_dds, weight=float(weight))
+                          real_dds=self.diagnostics.real_dds, weight=float(weight),
+                          motor13_command_ref=float(self.cmd.motor_cmd[13].q),
+                          motor14_command_ref=float(self.cmd.motor_cmd[14].q),
+                          motor13_correction=self.body_attitude_correction[0],
+                          motor14_correction=self.body_attitude_correction[1])
+            if phase == 'TEACH' and self.body_attitude_audit is not None:
+                record['body_attitude'] = self.body_attitude_audit.copy()
             write_start = self.clock()
             try:
                 with self.profiler.measure('dds_write'):

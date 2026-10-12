@@ -20,6 +20,10 @@ class ShadowSample:
     q12: float
     q13: float
     q14: float
+    limiter_dt_s: float
+    limiter_previous_state_timestamp: float
+    motor13_p_target: float
+    motor14_p_target: float
 
 
 class BodyAttitudeShadow:
@@ -46,7 +50,8 @@ class BodyAttitudeShadow:
         if self.reference is None:
             self.reference = measured.copy()
             self.previous_time = state.timestamp
-        dt = state.timestamp - self.previous_time
+        previous_time = self.previous_time
+        dt = state.timestamp - previous_time
         if dt < 0:
             raise ValueError('shadow state timestamp moved backwards')
         error = (self.reference - measured + np.pi) % (2 * np.pi) - np.pi
@@ -59,4 +64,6 @@ class BodyAttitudeShadow:
                             float(self.reference[0]), float(self.reference[1]),
                             float(error[0]), float(error[1]),
                             float(candidate[0]), float(candidate[1]),
-                            *(float(value) for value in state.waist_q))
+                            *(float(value) for value in state.waist_q),
+                            float(dt), float(previous_time),
+                            float(target[0]), float(target[1]))

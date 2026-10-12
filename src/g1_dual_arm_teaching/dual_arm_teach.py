@@ -99,7 +99,10 @@ def run_teach(controller, inbox, *, body_attitude_shadow=False, body_attitude_cl
             controller.emit(dict(event='BODY_ATTITUDE_SHADOW_REFERENCE',
                                  timestamp=measured.timestamp, **asdict(shadow_sample)))
         waist_label = controller.waist_kp_by_axis or (controller.static_hold_waist_kp or 60.,)*3
+        waist_reference_label = ('acquire reference + low-gain BODY attitude correction'
+                                 if body_attitude_closed_loop else 'reference unchanged')
         print(f'DUAL ARM TEACH MODE\nWAIST: 12..14 HOLD / Kp{waist_label}, Kd1.5, motor14 pitch bias = +0.010 rad\n'
+              f'BODY ATTITUDE: {"CLOSED LOOP" if body_attitude_closed_loop else "SHADOW" if body_attitude_shadow else "OFF"}; waist: {waist_reference_label}\n'
               'ARMS: LOCKED Kp40; DRAG shoulder/elbow Kp8, wrist Kp6; Kd1.5\n'
               'F = drag; M = lock and save waypoint; L = list count; Q = finish and release', flush=True)
         last_mode_log = controller.clock() - .2
@@ -118,7 +121,7 @@ def run_teach(controller, inbox, *, body_attitude_shadow=False, body_attitude_cl
                     reference = arm_mode.drag(state.q)
                     controller.emit(dict(event='ARM_TEACH_MODE', timestamp=now, mode='DRAG'))
                     print('[DRAG]\narms: shoulder/elbow Kp8, wrist Kp6\n'
-                          'waist: Kp80/80/120, reference unchanged', flush=True)
+                          f'waist: Kp80/80/120, {waist_reference_label}', flush=True)
                 elif action in ('m', 'mark'):
                     captured = arm_mode.lock(state.q, now)
                     reference = captured.copy()
@@ -142,6 +145,13 @@ def run_teach(controller, inbox, *, body_attitude_shadow=False, body_attitude_cl
             if body_attitude_closed_loop:
                 controller.set_body_attitude_correction(shadow_sample.motor13_candidate,
                                                         shadow_sample.motor14_candidate)
+            if shadow_sample is not None:
+                # Copy observation evidence into the actual Write record; no disk I/O here.
+                controller.body_attitude_audit = dict(
+                    state_timestamp=state.timestamp, closed_loop=body_attitude_closed_loop,
+                    kp_roll=float(shadow.kp[0]), kp_pitch=float(shadow.kp[1]),
+                    clamp_rad=shadow.clamp, rate_limit_rad_s=shadow.rate_limit,
+                    limiter_time_basis='LowState.timestamp', **asdict(shadow_sample))
             controller._frame(1., 'TEACH')
             if now - last_mode_log >= .2:
                 last_mode_log = now

@@ -221,12 +221,25 @@ def test_body_attitude_correction_passes_wire_guards_and_release_audit():
     controller.phase = 'HOLD'
     controller.set_teach_command(np.zeros(14), np.full(14, 40.))
     controller.set_body_attitude_correction(-.02, .03)
-    controller._frame(1., 'TEACH', publish=False)
+    written = []
+    transport.publisher = SimpleNamespace(Write=lambda cmd: written.append(
+        (cmd.motor_cmd[13].q, cmd.motor_cmd[14].q)))
+    controller.sequence = 1  # SDK-free path; first-command CDR is covered separately.
+    controller.body_attitude_audit = dict(state_timestamp=1., roll_error=-.04, pitch_error=.06)
+    controller._frame(1., 'TEACH')
+    controller.body_attitude_audit['roll_error'] = 99.
     assert controller.cmd.motor_cmd[13].q == pytest.approx(-.14)
     assert controller.cmd.motor_cmd[14].q == pytest.approx(.17)
     with pytest.raises(ValueError):
         controller.set_body_attitude_correction(.051, 0.)
-    controller._frame(.5, 'RELEASE', publish=False)
+    controller._frame(.5, 'RELEASE')
     assert controller.cmd.motor_cmd[13].q == pytest.approx(-.14)
     assert controller.cmd.motor_cmd[14].q == pytest.approx(.17)
+    np.testing.assert_allclose(written, [(-.14, .17), (-.14, .17)])
+    for record, actual in zip(controller.diagnostics.writes, written):
+        assert (record['motor13_command_ref'], record['motor14_command_ref']) == actual
+        assert (record['motor13_correction'], record['motor14_correction']) == (-.02, .03)
+        assert record['outcome'] == 'SUCCESS'
+    assert controller.diagnostics.writes[0]['body_attitude']['roll_error'] == -.04
+    assert 'body_attitude' not in controller.diagnostics.writes[1]
     assert controller.post_run_audit()['result'] == 'FIELDS_PASS_CDR_UNAVAILABLE'
