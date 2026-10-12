@@ -51,13 +51,21 @@ class CycleProfiler:
         self.enabled = False  # Final report serialization is outside the command loop.
         writes = [w for w in writes if w['outcome'] == 'SUCCESS']
         records = []
+        cursor = 0
         for left, right in zip(writes, writes[1:]):
             start, end = left['write_start'], right['write_start']
             detail = {}
-            for a, b, stage in self.segments:
+            while cursor < len(self.segments) and self.segments[cursor][1] <= start:
+                cursor += 1
+            index = cursor
+            while index < len(self.segments):
+                a, b, stage = self.segments[index]
+                if a >= end:
+                    break
                 overlap = max(0., min(b, end)-max(a, start))
                 if overlap:
                     detail[stage] = detail.get(stage, 0.)+overlap*1e6
+                index += 1
             fields = {group:0. for group in GROUPS.values()}
             for stage, value in detail.items():
                 fields[GROUPS[stage]] += value

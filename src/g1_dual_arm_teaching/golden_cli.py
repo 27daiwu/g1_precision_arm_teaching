@@ -6,6 +6,7 @@ import time
 from types import SimpleNamespace
 from .sdk.transport import UnitreeTransport, SimulationTransport
 from .sdk.golden_controller import ArmSdkGoldenController
+from .utils.naming import timestamped_path
 
 
 class BufferedDiagnostics:
@@ -44,7 +45,7 @@ def run_golden(args, config):
           'CONTROLLED_MOTORS = 12..28\nKP = 40\nKD = 1.5\nCOMMAND_FREQUENCY = 50 Hz\n'
           f'ACQUIRE_RAMP = 2.0 s\nFULL_WEIGHT_HOLD = {args.duration} s\nRELEASE_RAMP = 2.0 s\n'
           f'TAU_FF = 0\nMOTOR29_WEIGHT_ONLY = YES\nREAL_ACTUATION = {"YES" if real_write else "NO"}')
-    path = Path(args.log or f'logs/golden_hold_{time.time_ns()}.jsonl')
+    path = Path(args.log) if args.log else timestamped_path('logs', 'golden_hold', '.jsonl')
     path.parent.mkdir(parents=True, exist_ok=True)
     transport = UnitreeTransport() if args.real else SimulationTransport()
     previous = {}

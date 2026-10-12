@@ -15,7 +15,9 @@ from .control.body_attitude_shadow import BodyAttitudeShadow
 from .sdk.golden_controller import ArmSdkGoldenController
 from .sdk.golden_diagnostics import SafetyAbort
 from .sdk.transport import UnitreeTransport
+from .trajectory.recorder import TrajectoryRecorder
 from .utils.config import load_config
+from .utils.naming import timestamped_path
 
 
 HOLD_GAIN_RAMP_S = .4
@@ -74,10 +76,15 @@ class ArmTeachMode:
         return self.ramp_from + (self.ramp_to - self.ramp_from) * (s*s*(3-2*s))
 
 
-def run_teach(controller, inbox, *, body_attitude_shadow=False, body_attitude_closed_loop=False):
+def run_teach(controller, inbox, *, body_attitude_shadow=False, body_attitude_closed_loop=False,
+              recorder=None):
     waypoints = []
+    recorder = recorder or TrajectoryRecorder(context=dict(
+        body_attitude_shadow=body_attitude_shadow,
+        body_attitude_closed_loop=body_attitude_closed_loop))
     started = controller.clock()
     shutdown_times = {}
+    termination_reason = 'EXCEPTION_OR_SAFETY_EXIT'
     try:
         controller.capture_upper_body_pose()
         controller.acquire_current_pose()
@@ -104,7 +111,7 @@ def run_teach(controller, inbox, *, body_attitude_shadow=False, body_attitude_cl
         print(f'DUAL ARM TEACH MODE\nWAIST: 12..14 HOLD / Kp{waist_label}, Kd1.5, motor14 pitch bias = +0.010 rad\n'
               f'BODY ATTITUDE: {"CLOSED LOOP" if body_attitude_closed_loop else "SHADOW" if body_attitude_shadow else "OFF"}; waist: {waist_reference_label}\n'
               'ARMS: LOCKED Kp40; DRAG shoulder/elbow Kp8, wrist Kp6; Kd1.5\n'
-              'F = drag; M = lock and save waypoint; L = list count; Q = finish and release', flush=True)
+              'F = drag; M = lock and save waypoint; L = list count; R = start/stop trajectory in DRAG; Q = finish and release', flush=True)
         last_mode_log = controller.clock() - .2
         while True:
             now = controller.clock()
@@ -118,11 +125,13 @@ def run_teach(controller, inbox, *, body_attitude_shadow=False, body_attitude_cl
                 except queue.Empty:
                     break
                 if action in ('f', 'free', 'drag'):
+                    recorder.stop('EXIT_DRAG')
                     reference = arm_mode.drag(state.q)
                     controller.emit(dict(event='ARM_TEACH_MODE', timestamp=now, mode='DRAG'))
                     print('[DRAG]\narms: shoulder/elbow Kp8, wrist Kp6\n'
                           f'waist: Kp80/80/120, {waist_reference_label}', flush=True)
                 elif action in ('m', 'mark'):
+                    recorder.stop('EXIT_DRAG')
                     captured = arm_mode.lock(state.q, now)
                     reference = captured.copy()
                     point = dict(event='JOINT_WAYPOINT_MARK', index=len(waypoints)+1,
@@ -137,7 +146,16 @@ def run_teach(controller, inbox, *, body_attitude_shadow=False, body_attitude_cl
                           '[LOCK] arms -> Kp40; waist -> Kp80/80/120', flush=True)
                 elif action in ('l', 'list'):
                     print(f'WAYPOINT_COUNT = {len(waypoints)}', flush=True)
+                elif action in ('r', 'record'):
+                    if recorder.active is not None:
+                        recorder.stop('OPERATOR_STOP')
+                    elif arm_mode.mode == 'DRAG':
+                        recorder.start(arm_mode.mode)
+                    else:
+                        print('RECORDING_REJECTED = R is available only in DRAG mode', flush=True)
                 elif action in ('q', 'quit', 'exit'):
+                    recorder.stop('OPERATOR_QUIT')
+                    termination_reason = 'OPERATOR_QUIT'
                     finish = True
                     break
             kp = arm_mode.gains(now)
@@ -152,6 +170,8 @@ def run_teach(controller, inbox, *, body_attitude_shadow=False, body_attitude_cl
                     kp_roll=float(shadow.kp[0]), kp_pitch=float(shadow.kp[1]),
                     clamp_rad=shadow.clamp, rate_limit_rad_s=shadow.rate_limit,
                     limiter_time_basis='LowState.timestamp', **asdict(shadow_sample))
+            if recorder.active is not None and arm_mode.mode == 'DRAG':
+                recorder.sample(state, reference, controller.clock())
             controller._frame(1., 'TEACH')
             if now - last_mode_log >= .2:
                 last_mode_log = now
@@ -168,6 +188,12 @@ def run_teach(controller, inbox, *, body_attitude_shadow=False, body_attitude_cl
             if finish:
                 return waypoints
             controller._profiled_sleep(controller.period_s)
+    except SafetyAbort:
+        termination_reason = 'SAFETY_ABORT'
+        raise
+    except (InterruptedError, KeyboardInterrupt):
+        termination_reason = 'REQUEST_SAFE_SHUTDOWN'
+        raise
     finally:
         shutdown_times['SHUTDOWN_REQUEST_TIME'] = controller.clock()
         shutdown_times['FREEZE_REFERENCE_TIME'] = shutdown_times['SHUTDOWN_REQUEST_TIME']
@@ -177,6 +203,10 @@ def run_teach(controller, inbox, *, body_attitude_shadow=False, body_attitude_cl
         finally:
             shutdown_times['RELEASE_START_TIME'] = release_start
             shutdown_times['FINAL_WEIGHT_ZERO_TIME'] = controller.clock()
+            try:
+                recorder.finish(termination_reason)
+            except Exception as exc:
+                print(f'TRAJECTORY_FINALIZE_FAILED = {exc}', flush=True)
             writes = controller.diagnostics.writes
             controller.emit(dict(event='DUAL_ARM_TEACH_SUMMARY', teach_duration_s=controller.clock()-started,
                                  waypoint_count=len(waypoints), waist_q_start=None if controller.q_hold is None else controller.q_hold[:3].tolist(),
@@ -209,7 +239,7 @@ def main(argv=None):
     robot, waist = config['robot'], config['waist']
     if robot['domain_id'] != 0 or not all(robot[k] for k in ('hardware_reviewed', 'model_confirmed', 'arm_joint_mapping_verified')) or not waist['configuration_verified'] or waist['active_joints'] != [12,13,14]:
         raise ValueError('Golden hardware/mapping prerequisites are not verified')
-    path = Path(f'logs/dual_arm_teach_{time.time_ns()}.jsonl')
+    path = timestamped_path('logs', 'dual_arm_teach', '.jsonl')
     path.parent.mkdir(parents=True, exist_ok=True)
     transport, controller, previous = UnitreeTransport(), None, {}
     input_stop = threading.Event()
