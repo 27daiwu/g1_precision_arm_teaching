@@ -53,6 +53,7 @@ void move(ArmSdkController &controller, const ArmQ &from, const ArmQ &to,
   const auto started = Clock::now();
   auto deadline = started;
   while (true) {
+    if (controller.stop_requested()) break;
     const double elapsed = std::chrono::duration<double>(Clock::now() - started).count();
     const double t = std::min(elapsed, duration);
     controller.publish(interpolate(from, to, t, duration), TeachMode::Lock);
@@ -66,6 +67,7 @@ void wait_hold(ArmSdkController &controller, const ArmQ &q, double seconds) {
                                          std::chrono::duration<double>(seconds));
   auto deadline = Clock::now();
   while (Clock::now() < until) {
+    if (controller.stop_requested()) break;
     controller.publish(q, TeachMode::Lock);
     deadline += std::chrono::milliseconds(20);
     std::this_thread::sleep_until(deadline);
@@ -79,7 +81,12 @@ void list(const std::filesystem::path &directory) {
         const auto trajectory = load_trajectory(entry.path());
         std::cout << trajectory.name << " " << trajectory.points.size() << " points\n";
       } catch (const std::exception &error) {
-        std::cout << entry.path().filename().string() << " INVALID: " << error.what() << '\n';
+        const std::string message = error.what();
+        if (message.find("unsupported trajectory JSON version") != std::string::npos)
+          std::cout << entry.path().filename().string()
+                    << " (legacy session metadata; offline conversion required)\n";
+        else
+          std::cout << entry.path().filename().string() << " INVALID: " << message << '\n';
       }
     }
 }
@@ -108,7 +115,7 @@ int main(int argc, char **argv) {
     move(controller, current, trajectory.points.front().q,
          motion_duration(current, trajectory.points.front().q, options.speed));
     unsigned cycle = 0;
-    while (options.forever || cycle < options.cycles) {
+    while (!controller.stop_requested() && (options.forever || cycle < options.cycles)) {
       for (std::size_t i = 0; i < trajectory.points.size(); ++i) {
         const auto &point = trajectory.points[i];
         const auto &next = trajectory.points[(i + 1) % trajectory.points.size()];

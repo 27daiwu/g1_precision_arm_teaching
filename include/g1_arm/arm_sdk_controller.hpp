@@ -17,9 +17,12 @@ public:
   State latest() const;
   void acquire();
   void publish(const ArmQ &q, TeachMode mode, double weight = 1.0);
+  void publish(const ArmQ &q, const std::array<double, 14> &kp,
+               double weight = 1.0);
   void release() noexcept;
   void close() noexcept;
   bool acquired() const { return acquired_; }
+  bool stop_requested() const;
   double weight() const { return weight_; }
   const WaistQ &waist_reference() const { return waist_.reference(); }
   WaistQ waist_max_abs_error() const { return waist_.max_abs_error(); }
@@ -27,6 +30,8 @@ public:
   const std::string &fault() const { return fault_; }
 private:
   void send(const ArmQ &q, TeachMode mode, double weight,
+            double bias_progress);
+  void send(const ArmQ &q, const std::array<double, 14> &kp, double weight,
             double bias_progress);
   void wait_period(Clock::time_point &deadline) const;
   std::unique_ptr<Dds> dds_;
@@ -46,5 +51,6 @@ private:
   std::string fault_;
   ArmQ last_command_{};
   TeachMode last_mode_{TeachMode::Lock};
+  std::array<double, 14> last_kp_{};
 };
 } // namespace g1_arm

@@ -1,10 +1,8 @@
 #include "g1_arm/arm_sdk_controller.hpp"
 #include "g1_arm/recorder.hpp"
 
-#include <atomic>
-#include <condition_variable>
 #include <iostream>
-#include <mutex>
+#include <poll.h>
 #include <sstream>
 #include <thread>
 
@@ -61,48 +59,36 @@ int main(int argc, char **argv) {
     ArmQ reference{};
     for (int i = 0; i < 14; ++i) reference[i] = initial.q[15 + i];
     TeachMode mode = TeachMode::Lock;
-    std::atomic<bool> done{false};
-    std::mutex input_mutex;
-    std::condition_variable input_ready;
-    std::string pending;
-    std::thread input([&] {
-      std::string line;
-      while (!done && std::getline(std::cin, line)) {
-        {
-          std::lock_guard<std::mutex> lock(input_mutex);
-          pending = line;
-        }
-        input_ready.notify_one();
-      }
-      if (!done) done = true;
-    });
+    TeachState teach_mode(reference);
+    bool done = false;
     usage();
     auto deadline = Clock::now();
-    while (!done) {
+    while (!done && !controller.stop_requested()) {
       const auto state = controller.latest();
-      if (mode == TeachMode::Drag) {
-        for (int i = 0; i < 14; ++i) {
-          const double measured = state.q[15 + i];
-          const double error = measured - reference[i];
-          if (std::abs(error) > .015) reference[i] += .25 * error;
-        }
-      }
+      ArmQ measured{};
+      for (int i = 0; i < 14; ++i) measured[i] = state.q[15 + i];
       std::string command;
-      {
-        std::lock_guard<std::mutex> lock(input_mutex);
-        command.swap(pending);
+      pollfd input{0, POLLIN, 0};
+      if (poll(&input, 1, 0) > 0) {
+        if (!std::getline(std::cin, command)) done = true;
       }
       if (!command.empty()) {
         std::istringstream input_line(command);
         std::string op, name;
         input_line >> op >> name;
         if (op == "F" || op == "f") {
-          mode = mode == TeachMode::Drag ? TeachMode::Lock : TeachMode::Drag;
-          for (int i = 0; i < 14; ++i) reference[i] = state.q[15 + i];
+          if (mode == TeachMode::Drag) {
+            mode = TeachMode::Lock;
+            teach_mode.lock(measured, Clock::now());
+          } else {
+            mode = TeachMode::Drag;
+            teach_mode.drag(measured);
+          }
           std::cout << (mode == TeachMode::Drag ? "DRAG\n" : "LOCK\n");
         } else if (op == "M" || op == "m") {
           mode = TeachMode::Lock;
-          for (int i = 0; i < 14; ++i) reference[i] = state.q[15 + i];
+          teach_mode.lock(measured, Clock::now());
+          reference = measured;
           recorder.mark(state);
           const auto &point = recorder.trajectory().points.back();
           std::cout << "Locked and recorded " << point.name << '\n';
@@ -110,7 +96,8 @@ int main(int argc, char **argv) {
         else if (op == "R" || op == "r") {
           if (name.empty()) throw std::runtime_error("R requires point name");
           mode = TeachMode::Lock;
-          for (int i = 0; i < 14; ++i) reference[i] = state.q[15 + i];
+          teach_mode.lock(measured, Clock::now());
+          reference = measured;
           recorder.replace(name, state);
           std::cout << "Updated " << name << '\n';
         } else if (op == "D" || op == "d") recorder.erase(name);
@@ -122,15 +109,14 @@ int main(int argc, char **argv) {
         } else if (op == "Q" || op == "q") { done = true; break; }
         else usage();
       }
-      controller.publish(reference, mode);
+      if (mode == TeachMode::Drag) reference = teach_mode.update(measured);
+      controller.publish(reference, teach_mode.gains(Clock::now()));
       deadline += std::chrono::milliseconds(20);
       std::this_thread::sleep_until(deadline);
       if (deadline < Clock::now()) deadline = Clock::now();
     }
     controller.release();
     done = true;
-    input_ready.notify_all();
-    if (input.joinable()) input.detach();
     controller.close();
     return controller.faulted() ? 2 : 0;
   } catch (const std::exception &error) {

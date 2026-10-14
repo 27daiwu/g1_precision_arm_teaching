@@ -10,8 +10,8 @@
 
 namespace g1_arm {
 namespace {
-volatile std::sig_atomic_t stop_requested = 0;
-void on_signal(int) { stop_requested = 1; }
+volatile std::sig_atomic_t g_stop_requested = 0;
+void on_signal(int) { g_stop_requested = 1; }
 }
 
 ArmSdkController::ArmSdkController(std::unique_ptr<Dds> dds,
@@ -44,7 +44,7 @@ void ArmSdkController::start(const std::string &interface) {
           throw std::runtime_error("non-finite LowState motor " + std::to_string(motor));
       return;
     } catch (const std::runtime_error &) {
-      if (stop_requested) throw std::runtime_error("stopped waiting for LowState");
+      if (g_stop_requested) throw std::runtime_error("stopped waiting for LowState");
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
   }
@@ -67,7 +67,7 @@ void ArmSdkController::wait_period(Clock::time_point &deadline) const {
   std::this_thread::sleep_until(deadline);
   if (Clock::now() - deadline > std::chrono::milliseconds(50))
     throw std::runtime_error("50Hz control loop interruption >50ms");
-  if (stop_requested) throw std::runtime_error("operator stop requested");
+  if (g_stop_requested) throw std::runtime_error("operator stop requested");
   if (deadline < Clock::now()) deadline = Clock::now();
 }
 
@@ -82,9 +82,10 @@ void ArmSdkController::acquire() {
     waist_logger_ = std::make_unique<Logger>(log_directory_);
   const auto arm = captured_arm_;
   // Golden semantics: first ownership frame keeps measured q and carries weight=1.
+  attempted_write_ = true;
+  weight_ = 1.0;
   send(arm, TeachMode::Lock, 1.0, 0.0);
   acquired_ = true;
-  attempted_write_ = true;
   Clock::time_point deadline = Clock::now();
   const auto started = Clock::now();
   while (Clock::now() - started < std::chrono::seconds(2)) {
@@ -100,15 +101,25 @@ void ArmSdkController::acquire() {
 
 void ArmSdkController::send(const ArmQ &q, TeachMode mode, double weight,
                             double bias_progress) {
+  std::array<double, 14> kp{};
+  for (std::size_t i = 0; i < kp.size(); ++i) {
+    const bool shoulder_elbow = i == 0 || i == 1 || i == 2 || i == 3 ||
+                                i == 7 || i == 8 || i == 9 || i == 10;
+    kp[i] = mode == TeachMode::Lock ? 40.0 : (shoulder_elbow ? 8.0 : 6.0);
+  }
+  send(q, kp, weight, bias_progress);
+  last_mode_ = mode;
+}
+
+void ArmSdkController::send(const ArmQ &q, const std::array<double, 14> &kp,
+                            double weight, double bias_progress) {
   const auto state = latest();
   waist_.observe(state);
   ControlFrame frame;
   for (int motor = 15; motor <= 28; ++motor) {
     const auto offset = static_cast<std::size_t>(motor - 15);
     frame.q[motor] = q[offset];
-    const bool shoulder_elbow = offset == 0 || offset == 1 || offset == 2 || offset == 3 ||
-                                offset == 7 || offset == 8 || offset == 9 || offset == 10;
-    frame.kp[motor] = mode == TeachMode::Lock ? 40.0 : (shoulder_elbow ? 8.0 : 6.0);
+    frame.kp[motor] = kp[offset];
     frame.kd[motor] = 1.5;
   }
   frame.weight = weight;
@@ -124,11 +135,10 @@ void ArmSdkController::send(const ArmQ &q, TeachMode mode, double weight,
     throw std::runtime_error(fault_);
   }
   last_command_ = q;
-  last_mode_ = mode;
+  last_kp_ = kp;
   if (log_.is_open()) {
     std::lock_guard<std::mutex> guard(log_mutex_);
-    log_ << timestamp_local() << ',' << (mode == TeachMode::Lock ? "LOCK" : "DRAG")
-         << ',' << weight;
+    log_ << timestamp_local() << ",TEACH," << weight;
     for (int motor = 12; motor <= 28; ++motor)
       log_ << ',' << state.q[motor] << ',' << state.dq[motor] << ',' << frame.q[motor];
     log_ << '\n';
@@ -138,14 +148,30 @@ void ArmSdkController::send(const ArmQ &q, TeachMode mode, double weight,
 
 void ArmSdkController::publish(const ArmQ &q, TeachMode mode, double weight) {
   if (!acquired_ || released_) throw std::runtime_error("controller not acquired");
+  if (g_stop_requested) throw std::runtime_error("operator stop requested");
   send(q, mode, weight, 1.0);
   weight_ = weight;
 }
+
+void ArmSdkController::publish(const ArmQ &q, const std::array<double, 14> &kp,
+                               double weight) {
+  if (!acquired_ || released_) throw std::runtime_error("controller not acquired");
+  if (g_stop_requested) throw std::runtime_error("operator stop requested");
+  for (double value : kp)
+    if (!std::isfinite(value) || value < 6.0 || value > 40.0)
+      throw std::runtime_error("invalid arm gain");
+  send(q, kp, weight, 1.0);
+  last_mode_ = TeachMode::Lock;
+  weight_ = weight;
+}
+
+bool ArmSdkController::stop_requested() const { return g_stop_requested != 0; }
 
 void ArmSdkController::release() noexcept {
   if (!attempted_write_ || released_) return;
   released_ = true;
   const ArmQ hold = last_command_;
+  const double start_weight = weight_;
   const auto started = Clock::now();
   Clock::time_point deadline = Clock::now();
   try {
@@ -155,18 +181,20 @@ void ArmSdkController::release() noexcept {
       const double elapsed = std::chrono::duration<double>(Clock::now() - started).count();
       const double progress = smoothstep(elapsed / 2.0);
       const double remaining = 1.0 - progress;
-      send(hold, last_mode_, weight_ * remaining, remaining);
+      weight_ = start_weight * remaining;
+      send(hold, last_kp_, weight_, progress);
       if (deadline < Clock::now()) deadline = Clock::now();
     }
-    send(hold, last_mode_, 0.0, 0.0);
+    weight_ = 0.0;
+    send(hold, last_kp_, 0.0, 0.0);
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   } catch (const std::exception &error) {
     if (fault_.empty()) fault_ = error.what();
     try {
-      send(hold, last_mode_, 0.0, 0.0);
+      send(hold, last_kp_, 0.0, 0.0);
     } catch (...) {}
   } catch (...) {
-    try { send(hold, last_mode_, 0.0, 0.0); } catch (...) {}
+    try { send(hold, last_kp_, 0.0, 0.0); } catch (...) {}
   }
   acquired_ = false;
 }

@@ -85,6 +85,10 @@ int main() {
   assert(wire->frames.front().kp[13] == 80.0);
   assert(wire->frames.front().kp[14] == 120.0);
   assert(std::abs(controller.waist_reference()[2] - wire->state.q[14]) < 1e-12);
+  assert(wire->frames.size() > 10);
+  assert(wire->frames[1].weight > 0.0 && wire->frames[1].weight < 1.0);
+  assert(wire->frames[1].q[14] > wire->state.q[14]);
+  assert(wire->frames[1].q[14] < wire->state.q[14] + .010);
 
   ArmQ target{};
   for (std::size_t i = 0; i < target.size(); ++i) target[i] = wire->state.q[15 + i];
@@ -98,9 +102,13 @@ int main() {
   assert(std::abs(controller.waist_reference()[1] - wire->state.q[13]) < 1e-12);
   controller.publish(target, TeachMode::Lock);
   assert(wire->frames.back().kp[15] == 40.0 && wire->frames.back().kp[28] == 40.0);
+  const auto release_start_index = wire->frames.size();
   controller.release();
   assert(wire->frames.back().weight == 0.0);
   assert(std::abs(wire->frames.back().q[14] - wire->state.q[14]) < 1e-6);
+  assert(wire->frames[release_start_index].q[14] > wire->state.q[14]);
+  assert(wire->frames[release_start_index].q[14] < wire->state.q[14] + .010);
+  assert(std::abs(wire->frames.front().q[15] - wire->frames.back().q[15]) > 0.0);
   assert(wire->closed);
   std::filesystem::remove_all(tmp);
   std::cout << "G1 Arm SDK core offline checks passed\n";
