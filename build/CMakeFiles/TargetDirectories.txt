@@ -1,8 +1,0 @@
-/home/hebe/g1_precision_arm_teaching/build/CMakeFiles/g1_arm_core.dir
-/home/hebe/g1_precision_arm_teaching/build/CMakeFiles/g1_record.dir
-/home/hebe/g1_precision_arm_teaching/build/CMakeFiles/g1_replay.dir
-/home/hebe/g1_precision_arm_teaching/build/CMakeFiles/g1_core_test.dir
-/home/hebe/g1_precision_arm_teaching/build/CMakeFiles/g1_mapping_test.dir
-/home/hebe/g1_precision_arm_teaching/build/CMakeFiles/test.dir
-/home/hebe/g1_precision_arm_teaching/build/CMakeFiles/edit_cache.dir
-/home/hebe/g1_precision_arm_teaching/build/CMakeFiles/rebuild_cache.dir

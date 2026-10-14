@@ -1,2 +1,0 @@
-/usr/bin/ar qc libg1_arm_core.a CMakeFiles/g1_arm_core.dir/src/dds.cpp.o CMakeFiles/g1_arm_core.dir/src/arm_sdk_controller.cpp.o CMakeFiles/g1_arm_core.dir/src/waist_hold.cpp.o CMakeFiles/g1_arm_core.dir/src/trajectory.cpp.o CMakeFiles/g1_arm_core.dir/src/recorder.cpp.o CMakeFiles/g1_arm_core.dir/src/logger.cpp.o
-/usr/bin/ranlib libg1_arm_core.a
