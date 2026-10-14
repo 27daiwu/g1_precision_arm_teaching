@@ -1,87 +1,87 @@
-# G1 Dual Arm Teaching
+# G1 Dual Arm Teaching and Replay
 
-## Overview
+Pure C++17 applications using Unitree SDK2. The only command publisher is
+`rt/arm_sdk`; feedback is read from `rt/lowstate`. Motors 0-11 are never
+commanded. Motors 12-14 hold a fixed reference captured before ownership, and
+motors 15-28 are the two 7-DoF arms. Motor 29 carries Arm SDK ownership weight.
 
-Current Mainline: Dual-arm explicit lock + joint waypoint teaching MVP.
-按 `F` 进入双臂拖动模式，人工托住目标姿态，再按 `M` 锁定并记录 waypoint。
+## Build
 
-## Control Scope
+Install Unitree SDK2 and JsonCpp, then build with CMake:
 
-- 命令后端：Unitree Arm SDK `rt/arm_sdk`；实测状态：`rt/lowstate`。
-- motor12..14 保持接管时的腰部姿态；motor15..28 统一使用 LOCKED / DRAG 模式。
-- motor29 用于 ownership weight；正式控制链不使用 UserCtrl。
-- Gravity compensation: DISABLED。所有下发的 `tau_ff = 0`。
-
-## Current Control Parameters
-
-| 关节与状态 | Kp | Kd | 位置参考 |
-| --- | --- | --- | --- |
-| motor12 waist_yaw | 80 | 1.5 | 接管时腰部 q |
-| motor13 waist_roll | 80 | 1.5 | 接管时腰部 q |
-| motor14 waist_pitch | 120 | 1.5 | 接管时腰部 q + 0.010 rad |
-| motor15..28 LOCKED | 40 | 1.5 | 锁定时捕获的 q |
-| 肩肘 DRAG | 8 | 1.5 | 每周期实测 q |
-| 手腕 DRAG | 6 | 1.5 | 每周期实测 q |
-
-启动后双臂处于 LOCKED。`F` 是进入 DRAG 的唯一方式；`M` 将双臂重新锁定。
-机器人运动、dq 和 position error 都不会自动切换模式。DRAG 中每个周期直接使用
-`q_ref = measured_q`。按 `F` 仅降低双臂阻抗，不释放 Arm SDK ownership。
-腰部 Kp80/80/120 贯穿 ACQUIRE、LOCKED、DRAG 和 RELEASE，直到 ownership
-weight 降为 0。motor14 的 +0.010 rad reference bias 随 2 s acquire smoothstep
-平滑进入，接管完成后在 HOLD、LOCKED、DRAG 和 RELEASE 中保持不变。
-motor12/13 reference 和腰部 safety 基准仍是启动时的 acquire q；F/M 不重新采样腰部。
-
-## Teaching Workflow
-
-1. 启动程序，机器人接管当前姿态，以 Kp40 进入 LOCKED。
-2. 按 `F` 进入双臂 DRAG，人工拖动并托住目标姿态。
-3. 按 `M`。系统使用同一次 LowState capture 保存 motor15..28 waypoint、冻结双臂 reference，并统一切换为 LOCKED；Kp 在 0.4 s 内通过 smoothstep 恢复至 40。
-4. 松手检查是否稳定保持。下一点再次按 `F`，拖动并按 `M`。
-5. 按 `L` 查看 waypoint 数量；按 `Q` 正常 release 并退出。
-
-## Run on Robot
-
-仅由现场操作者在确认网卡后执行：
-
-```bash
-python scripts/dual_arm_teach.py eth0
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+ctest --test-dir build --output-on-failure
 ```
 
-## Controls
+The build uses the installed SDK2 CMake package. To use a source checkout,
+configure with its exported package path, for example:
 
-| 按键 | 操作 |
-| --- | --- |
-| `F` | 全部双臂关节进入低 Kp DRAG |
-| `M` | 锁定双臂并保存 waypoint |
-| `L` | 显示 waypoint 数量 |
-| `Q` | 正常释放并退出 |
-
-## Safety and Release
-
-接管使用 2 s smoothstep。腰部 warning delta 为 0.05 rad，hard delta 为
-0.08 rad，hard dq 为 0.5 rad/s。保留 arm safety、首帧保护、DDS/CRC 校验及
-限时关闭。正常结束或中止时渐变释放 ownership，最终明确写入 weight=0。
-
-## Logs and Waypoints
-
-运行响应写入 `logs/dual_arm_teach_*.jsonl`；每次按 `M` 的 motor15..28
-实测 waypoint 记录为 `JOINT_WAYPOINT_MARK` 事件。
-
-## Offline Validation
-
-```bash
-python3 -m pip install -e '.[test]'
-python3 -m pytest -q
-python3 -m compileall -q src scripts tools tests
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=/home/hebe/unitree_workspace/unitree_sdk2/build
 ```
 
-## Repository Layout
+## Record
 
-`scripts/` 只有正式示教入口。`tools/` 是历史、诊断和基线工具，不属于示教流程。
-`docs/` 保留历史报告，`tests/` 提供离线与 mock 验证。
+```sh
+./build/g1_record my_track --interface eth0
+```
 
-## Current Limitations
+Commands are line based:
 
-- 无 gravity compensation、Cartesian IK 或 playback。
-- 腰部是阻抗保持，不是机械锁定。
-- DRAG 状态下的手臂需要人工托住后再按 `M`。
+- `F`: toggle DRAG and LOCK.
+- `M`: capture the measured 14-joint pose, record the next point, and enter LOCK.
+- `L`: list points and joint angles.
+- `R B`: replace point B with the current measured pose and enter LOCK.
+- `D B`: delete point B.
+- `N new_name`: rename the trajectory.
+- `S`: save to `trajectories/my_track.json`, then release.
+- `Q`: discard unsaved edits, then release.
+
+## Replay
+
+```sh
+./build/g1_replay --list
+./build/g1_replay my_track --preview
+./build/g1_replay my_track --interface eth0 --cycles 3 --hold 2
+./build/g1_replay my_track --interface eth0 --forever --speed 0.5
+```
+
+`--hold` overrides the hold at every point. Without it, each point's `hold_s`
+is used. `--speed` is the maximum joint-space speed in rad/s. Replay first
+moves smoothly from the measured pose to A, then follows saved point order,
+including the final point back to A. `--dir` changes the trajectory directory.
+
+## Control values
+
+- Rate: 50 Hz. Acquire and release use the Golden 2 second smoothstep behavior.
+- Golden first frame: motor 12-28 q values are captured from live LowState and
+  ownership weight is 1.0. The motor 14 +0.010 rad bias fades in during acquire
+  and fades out during release. A final weight 0 frame is always attempted.
+- LOCK: arm Kp 40, Kd 1.5, tau_ff 0.
+- DRAG: shoulder/elbow Kp 8, wrist Kp 6, Kd 1.5, tau_ff 0. Measured-q follow
+  updates a reference by 0.25 of the error when error exceeds 0.015 rad.
+- Waist: motor 12/13/14 Kp 80/80/120, Kd 1.5, tau_ff 0. Its reference is
+  captured once and never follows arm motion; motor 14 uses the static bias above.
+- Joint sanity limits use the local G1 29-DoF URDF at
+  `/home/hebe/unitree_workspace/unitree_ros/robots/g1_description/g1_29dof.urdf`.
+  Confirm the model revision and field limits against the deployed robot before
+  enabling motion.
+
+## Exit and logs
+
+`S`, `Q`, Ctrl+C, normal completion, and recoverable application errors share
+the release path. Release sends a 2 second smooth weight reduction and a final
+weight 0 frame. CSV logs are written under `logs/`, including waist measured q,
+dq, reference, and maximum absolute reference error.
+
+The program requires exclusive ownership of the robot's Arm SDK channel. Keep
+the native locomotion controller responsible for the legs. No real-robot test
+is part of the offline build or test suite.
+
+Existing NPZ sessions, candidate data, waypoint YAML, and historical logs are
+retained as research artifacts. The executable does not load NPZ or require a
+Python runtime. Point files use JSON version 1 with 14 absolute arm angles in
+radians and the three captured waist reference angles.

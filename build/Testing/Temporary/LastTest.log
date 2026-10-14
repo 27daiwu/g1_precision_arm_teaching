@@ -1,0 +1,66 @@
+Start testing: Oct 14 17:18 CST
+----------------------------------------------------------
+1/4 Testing: g1_core_offline
+1/4 Test: g1_core_offline
+Command: "/home/hebe/g1_precision_arm_teaching/build/g1_core_test"
+Directory: /home/hebe/g1_precision_arm_teaching/build
+"g1_core_offline" start time: Oct 14 17:18 CST
+Output:
+----------------------------------------------------------
+G1 Arm SDK core offline checks passed
+<end of output>
+Test time =   4.08 sec
+----------------------------------------------------------
+Test Passed.
+"g1_core_offline" end time: Oct 14 17:18 CST
+"g1_core_offline" time elapsed: 00:00:04
+----------------------------------------------------------
+
+2/4 Testing: g1_mapping_offline
+2/4 Test: g1_mapping_offline
+Command: "/home/hebe/g1_precision_arm_teaching/build/g1_mapping_test"
+Directory: /home/hebe/g1_precision_arm_teaching/build
+"g1_mapping_offline" start time: Oct 14 17:18 CST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"g1_mapping_offline" end time: Oct 14 17:18 CST
+"g1_mapping_offline" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/4 Testing: record_help
+3/4 Test: record_help
+Command: "/home/hebe/g1_precision_arm_teaching/build/g1_record" "--help"
+Directory: /home/hebe/g1_precision_arm_teaching/build
+"record_help" start time: Oct 14 17:18 CST
+Output:
+----------------------------------------------------------
+Usage: g1_record NAME --interface eth0 [--dir trajectories]
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"record_help" end time: Oct 14 17:18 CST
+"record_help" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/4 Testing: replay_help
+4/4 Test: replay_help
+Command: "/home/hebe/g1_precision_arm_teaching/build/g1_replay" "--help"
+Directory: /home/hebe/g1_precision_arm_teaching/build
+"replay_help" start time: Oct 14 17:18 CST
+Output:
+----------------------------------------------------------
+Usage: g1_replay NAME [--interface eth0] [--cycles N|--forever] [--hold SEC] [--speed RAD_PER_SEC] [--preview]
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"replay_help" end time: Oct 14 17:18 CST
+"replay_help" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Oct 14 17:18 CST

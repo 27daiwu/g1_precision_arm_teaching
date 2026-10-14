@@ -5,7 +5,7 @@ import numpy as np
 from .arm_sdk_types import JointState
 from .golden_controller import ArmSdkGoldenController
 from ..control.body_attitude_shadow import BodyAttitudeShadow
-from ..trajectory.replay_c2 import C2ReplayPlan
+from ..trajectory.replay_c2 import C2ReplayPlan, RelativeReplaySpec
 
 
 class FakeReplayTransport:
@@ -49,24 +49,31 @@ class ReplayFakeController(ArmSdkGoldenController):
         self.original_write=transport.publisher.Write
         transport.publisher.Write=self._protected_write
     def acquire(self,plan,hold_end_s):
-        if type(plan) is not C2ReplayPlan or plan.limits != self.limits:
-            raise ValueError('validated C2 plan with matching limits required')
+        if (type(plan) is not C2ReplayPlan and not isinstance(plan,RelativeReplaySpec)) or plan.limits != self.limits:
+            raise ValueError('validated C2 plan or relative replay spec with matching limits required')
         if not np.isfinite(hold_end_s) or hold_end_s<0:raise ValueError('invalid hold duration')
-        self.plan=plan;self.hold_end_s=hold_end_s
+        self.hold_end_s=hold_end_s
         self.transitions.append('ACQUIRE')
         try:
             self.capture_upper_body_pose()
+            if isinstance(plan,RelativeReplaySpec):
+                self.plan=plan.bind(self.q_hold[3:])
+            else:
+                self.plan=plan
             self.acquire_current_pose()
             self._frame(1.,'HOLD')
             self.transitions.append('START_CHECK')
             state=self._state()
-            if np.max(np.abs(state.q-plan.q[0]))>self.limits.start_error or np.max(np.abs(state.dq))>self.limits.start_velocity:
+            if (np.max(np.abs(state.q-self.plan.q[0]))>self.limits.start_error or
+                    np.max(np.abs(state.dq))>self.limits.start_velocity):
                 raise ValueError('start mismatch; no alignment motion')
+            if isinstance(plan,RelativeReplaySpec) and not np.array_equal(self.plan.q[0],self.q_hold[3:]):
+                raise ValueError('relative first reference must equal acquire snapshot exactly')
             self.shadow.update(state)
             self.last_reference=state.q.copy()
             self.last_publish=self.clock()
             self.last_feedback=state
-            self.deadline=self.clock()+plan.duration+hold_end_s+self.limits.cycle_timeout
+            self.deadline=self.clock()+self.plan.duration+hold_end_s+self.limits.cycle_timeout
             self.started=self.clock();self.replay_active=True
             self.transitions.append('EXECUTE')
         except BaseException:

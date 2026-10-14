@@ -77,3 +77,40 @@ def require_real_acquire(config, current_pose_only):
         verified_limits(config)
         if r['ready_for_phase1_real_joint_motion'] is not True:
             raise RuntimeError('Phase 1 real joint motion has not been manually approved')
+
+
+def require_teaching_topology(config):
+    """Validate the robot mapping shared by Teaching and Replay DDS entrypoints."""
+    robot, waist = config['robot'], config['waist']
+    if robot['domain_id'] != 0:
+        raise ValueError('Golden hardware/mapping prerequisites not met')
+    if not all(robot[key] is True for key in
+               ('hardware_reviewed', 'model_confirmed', 'arm_joint_mapping_verified')):
+        raise ValueError('Golden hardware/mapping prerequisites not met')
+    if waist['configuration_verified'] is not True or waist['active_joints'] != [12, 13, 14]:
+        raise ValueError('Golden hardware/mapping prerequisites not met')
+
+
+def resolve_network_interface(config, requested=None):
+    """Use the configured interface or require one unambiguous live IPv4 link."""
+    if requested:
+        return requested
+    configured = config['robot'].get('network_interface')
+    if configured:
+        return configured
+    try:
+        from psutil import net_if_addrs, net_if_stats
+        import socket
+    except ImportError as exc:
+        raise RuntimeError('network_interface is unset and psutil is unavailable; set it in configs/robot.yaml') from exc
+    addresses, stats = net_if_addrs(), net_if_stats()
+    candidates = []
+    for name, entries in addresses.items():
+        if name == 'lo' or name not in stats or not stats[name].isup:
+            continue
+        if any(item.family == socket.AF_INET and not item.address.startswith('127.')
+               for item in entries):
+            candidates.append(name)
+    if len(candidates) != 1:
+        raise RuntimeError(f'cannot uniquely identify robot network interface; candidates={sorted(candidates)}; set robot.network_interface in configs/robot.yaml')
+    return candidates[0]

@@ -3,6 +3,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from g1_dual_arm_teaching.trajectory.replay import ReplayLimits, ReplayPlan, ReplayGains, MockReplayExecutor
+from g1_dual_arm_teaching.trajectory.replay_c2 import C2ReplayPlan, RelativeC2ReplayPlan, RelativeReplaySpec
+from g1_dual_arm_teaching.trajectory.replay_permission import ReplayPermission
 
 
 def limits():
@@ -143,3 +145,60 @@ def test_first_target_step_is_checked_without_start_alignment(tmp_path):
     np.testing.assert_array_equal(e.owner.references[0],np.zeros(14))
     e.close()
     assert e.owner.released
+
+
+def test_relative_plan_rebases_exactly_scales_motion_and_preserves_absolute_plan(tmp_path):
+    p,meta,a=fixture(tmp_path)
+    before=np.load(p,allow_pickle=False)['q_measured'].copy()
+    absolute=C2ReplayPlan.load(p,limits(),.5,jerk_limit=1e6,jerk_jump_limit=1e6)
+    acquire=np.linspace(-.2,.2,14)
+    relative=RelativeC2ReplayPlan.load(p,limits(),.5,jerk_limit=1e6,
+        jerk_jump_limit=1e6,acquire_q=acquire,motion_scale=.25)
+    np.testing.assert_array_equal(relative.sample(0.)[0],acquire)
+    np.testing.assert_allclose(relative.q[-1]-acquire,.0005,atol=1e-12)
+    np.testing.assert_array_equal(absolute.q,a['q_measured'])
+    np.testing.assert_array_equal(np.load(p,allow_pickle=False)['q_measured'],before)
+    assert relative.duration==pytest.approx(absolute.duration)
+    assert relative.peak_velocity == pytest.approx(absolute.peak_velocity*.25,rel=1e-6)
+    assert relative.peak_acceleration == pytest.approx(absolute.peak_acceleration*.25,rel=1e-6)
+
+
+def test_relative_spec_binds_only_to_acquire_snapshot_and_selects_segment(tmp_path):
+    p,_,_=fixture(tmp_path)
+    spec=RelativeReplaySpec.load(p,limits(),1.,jerk_limit=1e6,jerk_jump_limit=1e6,
+        motion_scale=.5,start_index=0,end_index=3)
+    acquire=np.full(14,.25)
+    plan=spec.bind(acquire)
+    np.testing.assert_array_equal(plan.q[0],acquire)
+    assert plan.start_index==0 and plan.end_index==3
+    np.testing.assert_allclose(plan.q[-1]-acquire,.001,atol=1e-12)
+
+
+def test_relative_plan_rejects_out_of_range_rebased_target(tmp_path):
+    p,_,_=fixture(tmp_path)
+    with pytest.raises(ValueError):
+        RelativeC2ReplayPlan.load(p,limits(),1.,jerk_limit=1e6,
+            jerk_jump_limit=1e6,acquire_q=np.full(14,1.999),motion_scale=2.)
+
+
+def test_relative_plan_requires_permission_bound_to_mode_scale_and_segment(tmp_path):
+    p,_,_=fixture(tmp_path)
+    plan=RelativeC2ReplayPlan.load(p,limits(),1.,jerk_limit=1e6,
+        jerk_jump_limit=1e6,acquire_q=np.zeros(14),motion_scale=.5,
+        start_index=0,end_index=3)
+    permission=object.__new__(ReplayPermission)
+    permission.replay_mode='absolute'
+    permission.manifest={'relative_motion_scale':.5,'relative_start_index':0,
+        'relative_end_index':3,'max_first_run_duration_s':10.,
+        'max_first_run_span_rad':1.}
+    permission.stop=1000.
+    permission.limits=ReplayLimits((-2.,)*14,(2.,)*14,1e9,1e9,1.,.1,1.,1.,1.,1.,10.,1.)
+    permission.jerk=1e9
+    with pytest.raises(ValueError,match='replay_mode'):
+        permission.check_plan(plan)
+    permission.replay_mode='relative'
+    permission.manifest['relative_motion_scale']=.25
+    with pytest.raises(ValueError,match='not bound'):
+        permission.check_plan(plan)
+    permission.manifest['relative_motion_scale']=.5
+    permission.check_plan(plan)

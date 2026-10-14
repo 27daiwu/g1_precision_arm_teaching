@@ -236,9 +236,8 @@ def main(argv=None):
                         help='apply low-gain torso P correction to waist motors 13 and 14 during TEACH')
     args = parser.parse_args(argv)
     config = load_config('configs')
-    robot, waist = config['robot'], config['waist']
-    if robot['domain_id'] != 0 or not all(robot[k] for k in ('hardware_reviewed', 'model_confirmed', 'arm_joint_mapping_verified')) or not waist['configuration_verified'] or waist['active_joints'] != [12,13,14]:
-        raise ValueError('Golden hardware/mapping prerequisites are not verified')
+    from .utils.hardware import require_teaching_topology
+    require_teaching_topology(config)
     path = timestamped_path('logs', 'dual_arm_teach', '.jsonl')
     path.parent.mkdir(parents=True, exist_ok=True)
     transport, controller, previous = UnitreeTransport(), None, {}

@@ -4,7 +4,7 @@ import numpy as np
 from .transport import UnitreeTransport
 from .replay_fake_adapter import ReplayFakeController,FakeReplayTransport
 from .golden_reference import GOLDEN_RAMP_S
-from ..trajectory.replay_c2 import C2ReplayPlan
+from ..trajectory.replay_c2 import C2ReplayPlan, RelativeReplaySpec
 
 
 class ReplayController(ReplayFakeController):
@@ -22,14 +22,25 @@ class ReplayController(ReplayFakeController):
         self.period_s=permission.period
 
     def acquire(self,plan,hold_end_s=None):
-        if type(plan) is not C2ReplayPlan or plan.limits!=self.limits:raise ValueError('validated matching C2 plan required')
-        self.permission.check_plan(plan)
-        self.plan=plan;self.hold_end_s=self.permission.hold
+        if (type(plan) is not C2ReplayPlan and not isinstance(plan,RelativeReplaySpec)):
+            raise ValueError('validated C2 plan or relative replay specification required')
+        if plan.limits!=self.limits:raise ValueError('plan limits do not match permission')
+        self.hold_end_s=self.permission.hold
         self.start_transition=None
+        relative_mode=isinstance(plan,RelativeReplaySpec)
         self.transitions.append('ACQUIRE')
         try:
             self.capture_upper_body_pose()
-            self.start_transition=self.permission.make_start_transition(self.q_hold[3:],plan)
+            if isinstance(plan,RelativeReplaySpec):
+                self.plan=plan.bind(self.q_hold[3:])
+                self.teach_q=self.q_hold[3:].copy()
+                self.teach_kp=np.full(14,40.)
+                self.runtime_guard.teach_q=self.teach_q
+                self.runtime_guard.teach_kp=self.teach_kp
+            else:
+                self.plan=plan
+                self.start_transition=self.permission.make_start_transition(self.q_hold[3:],self.plan)
+            self.permission.check_plan(self.plan)
             if self.start_transition is not None:
                 times=np.linspace(0.,self.start_transition.duration,max(2,int(np.ceil(self.start_transition.duration/self.period_s))+1))
                 predicted=np.asarray([self.start_transition.sample(t)[0] for t in times])
@@ -53,13 +64,15 @@ class ReplayController(ReplayFakeController):
                 self._profiled_sleep(self.period_s)
             self._preflight()
             self.last_reference=np.array([m.q for m in self.cmd.motor_cmd[15:29]])
-            first_ref=self.start_transition.sample(0.)[0] if self.start_transition is not None else plan.q[0]
+            first_ref=self.start_transition.sample(0.)[0] if self.start_transition is not None else self.plan.q[0]
             if np.max(np.abs(first_ref-self.last_reference))>min(self.limits.step,self.limits.velocity*self.period_s):
                 raise ValueError('first target transfer exceeds step/rate budget')
             if np.max(np.abs(first_ref-self.last_reference))>1e-6:
                 raise ValueError('C2 start reference must match captured command within wire tolerance; no alignment motion')
+            if relative_mode and not np.array_equal(first_ref,self.q_hold[3:]):
+                raise ValueError('relative first reference must equal captured LowState arm pose')
             self.last_publish=self.clock();self.last_feedback=self._state()
-            self.started=self.clock();self.motion_duration=plan.duration+(self.start_transition.duration if self.start_transition else 0.)
+            self.started=self.clock();self.motion_duration=self.plan.duration+(self.start_transition.duration if self.start_transition else 0.)
             self.deadline=self.started+self.motion_duration+self.hold_end_s+self.limits.cycle_timeout
             self.replay_active=True;self.fault_kind='motion'
             self.transitions.append('EXECUTE')

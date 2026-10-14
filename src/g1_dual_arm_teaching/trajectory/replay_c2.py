@@ -1,4 +1,5 @@
 """Auditable C2 quintic Hermite interpolation on unmodified recorded times."""
+import copy
 import numpy as np
 from .replay import ReplayPlan, load_replay_trajectory
 
@@ -102,4 +103,132 @@ class C2ReplayPlan(C2Curve):
     @classmethod
     def load(cls,path,limits,speed_scale,*,jerk_limit,jerk_jump_limit):
         m,a=load_replay_trajectory(path,limits.max_samples)
-        return cls(m,a,limits,speed_scale,jerk_limit=jerk_limit,jerk_jump_limit=jerk_jump_limit)
+        return cls(m,a,limits,speed_scale,jerk_limit=jerk_limit,
+                   jerk_jump_limit=jerk_jump_limit)
+
+
+class RelativeC2ReplayPlan(C2ReplayPlan):
+    """C2 plan whose recorded displacement is rebased onto one acquire snapshot.
+
+    This object is only an offline plan. Hardware execution still requires the
+    existing permission manifest and its independent approvals.
+    """
+    def __init__(self, metadata, arrays, limits, speed_scale, *, jerk_limit,
+                 jerk_jump_limit, acquire_q, motion_scale=1.0,
+                 start_index=0, end_index=None):
+        q_source = np.asarray(arrays.get("q_measured"), dtype=float)
+        time_source = np.asarray(arrays.get("timestamp"), dtype=float)
+        if q_source.ndim != 2 or q_source.shape[1:] != (14,):
+            raise ValueError("invalid recorded arm positions")
+        n = len(q_source)
+        end_index = n if end_index is None else end_index
+        if (type(start_index) is not int or type(end_index) is not int or
+                not 0 <= start_index < end_index <= n or end_index-start_index < 3):
+            raise ValueError("relative replay segment must contain at least three samples")
+        acquire = np.asarray(acquire_q, dtype=float)
+        if acquire.shape != (14,) or not np.isfinite(acquire).all():
+            raise ValueError("acquire_q must be one finite 14-axis snapshot")
+        if not np.isfinite(motion_scale) or motion_scale <= 0:
+            raise ValueError("motion_scale must be finite and positive")
+        if time_source.shape != (n,) or not np.isfinite(time_source).all():
+            raise ValueError("invalid recorded timestamps")
+        if metadata.get("sample_count") != n or metadata.get("data_integrity") != "PASS":
+            raise ValueError("source metadata integrity is not PASS")
+        source_shapes = {"timestamp": (n,), "cycle_timestamp": (n,),
+                         "q_measured": (n, 14), "dq_measured": (n, 14),
+                         "q_ref": (n, 14), "waist_q": (n, 3),
+                         "torso_roll_pitch": (n, 2)}
+        for key, shape in source_shapes.items():
+            value = np.asarray(arrays.get(key), dtype=float)
+            if value.shape != shape or not np.isfinite(value).all():
+                raise ValueError(f"invalid source field {key}")
+        if (not np.array_equal(arrays.get("arm_motor_ids"), np.arange(15, 29)) or
+                not np.array_equal(arrays.get("waist_motor_ids"), np.arange(12, 15))):
+            raise ValueError("source motor mapping must be 15..28 and 12..14")
+        source_dt = np.diff(time_source)
+        cycle_time = np.asarray(arrays["cycle_timestamp"], dtype=float)
+        if (np.any(source_dt <= 0) or np.any(source_dt > limits.gap) or
+                np.any(np.diff(cycle_time) <= 0) or np.any(cycle_time < time_source)):
+            raise ValueError("source time is discontinuous or invalid")
+        if not np.isclose(metadata.get("duration_s", -1),
+                          time_source[-1]-time_source[0], atol=1e-8, rtol=1e-8):
+            raise ValueError("source metadata duration mismatch")
+        for key, expected in (("start_q", q_source[0]), ("end_q", q_source[-1])):
+            if key in metadata and not np.allclose(metadata[key], expected, atol=1e-10, rtol=0):
+                raise ValueError(f"source metadata {key} mismatch")
+        selected = {key: np.asarray(value)[start_index:end_index].copy()
+                    for key, value in arrays.items()
+                    if key in ("timestamp", "cycle_timestamp", "q_measured", "dq_measured",
+                               "q_ref", "waist_q", "torso_roll_pitch")}
+        selected["arm_motor_ids"] = np.asarray(arrays.get("arm_motor_ids")).copy()
+        selected["waist_motor_ids"] = np.asarray(arrays.get("waist_motor_ids")).copy()
+        recorded_start = selected["q_measured"][0].copy()
+        source_q = selected["q_measured"].copy()
+        source_time = selected["timestamp"].copy()
+        source_waist = selected["waist_q"].copy()
+        selected["q_measured"] = acquire + float(motion_scale) * (selected["q_measured"]-recorded_start)
+        selected["dq_measured"] = float(motion_scale) * selected["dq_measured"]
+        selected["q_ref"] = acquire + float(motion_scale) * (selected["q_ref"]-recorded_start)
+        selected_metadata = dict(metadata)
+        selected_metadata.update(sample_count=end_index-start_index,
+                                 duration_s=float(selected["timestamp"][-1]-selected["timestamp"][0]),
+                                 start_q=selected["q_measured"][0].tolist(),
+                                 end_q=selected["q_measured"][-1].tolist(),
+                                 data_integrity="PASS")
+        super().__init__(selected_metadata, selected, limits, speed_scale,
+                         jerk_limit=jerk_limit, jerk_jump_limit=jerk_jump_limit)
+        self.motion_scale = float(motion_scale)
+        self.start_index, self.end_index = start_index, end_index
+        self.recorded_start_q = recorded_start
+        self.acquire_q = acquire.copy()
+        self.source_q = source_q
+        self.source_time = source_time
+        self.source_waist_q = source_waist
+        if not np.array_equal(self.q[0], acquire):
+            raise ValueError("relative first reference must exactly equal acquire snapshot")
+        self.acquire_q.setflags(write=False)
+        self.recorded_start_q.setflags(write=False)
+        self.source_q.setflags(write=False)
+        self.source_time.setflags(write=False)
+        self.source_waist_q.setflags(write=False)
+        self.source_metadata = metadata
+
+    @classmethod
+    def load(cls, path, limits, speed_scale, *, jerk_limit, jerk_jump_limit,
+             acquire_q, motion_scale=1.0, start_index=0, end_index=None):
+        metadata, arrays = load_replay_trajectory(path, limits.max_samples)
+        return cls(metadata, arrays, limits, speed_scale, jerk_limit=jerk_limit,
+                   jerk_jump_limit=jerk_jump_limit, acquire_q=acquire_q,
+                   motion_scale=motion_scale, start_index=start_index,
+                   end_index=end_index)
+
+
+class RelativeReplaySpec:
+    """Validated source selection; bind only after capturing the acquire state."""
+    def __init__(self, metadata, arrays, limits, speed_scale, *, jerk_limit,
+                 jerk_jump_limit, motion_scale=1.0, start_index=0,
+                 end_index=None):
+        self.metadata = copy.deepcopy(metadata)
+        self.arrays = {key: np.asarray(value).copy() for key, value in arrays.items()}
+        for value in self.arrays.values():
+            value.setflags(write=False)
+        self.limits, self.speed_scale = limits, speed_scale
+        self.jerk_limit, self.jerk_jump_limit = jerk_limit, jerk_jump_limit
+        self.motion_scale = motion_scale
+        self.start_index, self.end_index = start_index, end_index
+
+    @classmethod
+    def load(cls, path, limits, speed_scale, *, jerk_limit, jerk_jump_limit,
+             motion_scale=1.0, start_index=0, end_index=None):
+        metadata, arrays = load_replay_trajectory(path, limits.max_samples)
+        return cls(metadata, arrays, limits, speed_scale,
+                   jerk_limit=jerk_limit, jerk_jump_limit=jerk_jump_limit,
+                   motion_scale=motion_scale, start_index=start_index,
+                   end_index=end_index)
+
+    def bind(self, acquire_q):
+        return RelativeC2ReplayPlan(
+            self.metadata, self.arrays, self.limits, self.speed_scale,
+            jerk_limit=self.jerk_limit, jerk_jump_limit=self.jerk_jump_limit,
+            acquire_q=acquire_q, motion_scale=self.motion_scale,
+            start_index=self.start_index, end_index=self.end_index)

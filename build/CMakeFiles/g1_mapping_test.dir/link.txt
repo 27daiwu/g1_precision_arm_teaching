@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/g1_mapping_test.dir/tests/mapping_test.cpp.o -o g1_mapping_test   -L/usr/local/lib  -Wl,-rpath,/usr/local/lib libg1_arm_core.a /usr/local/lib/libunitree_sdk2.a -lddsc -lddscxx /usr/lib/x86_64-linux-gnu/libjsoncpp.so.1.9.5 

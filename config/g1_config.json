@@ -1,0 +1,40 @@
+{
+  "robot": "G1-29DoF-dual-foot",
+  "sdk_domain_id": 0,
+  "frequency_hz": 50,
+  "topics": {
+    "state": "rt/lowstate",
+    "command": "rt/arm_sdk"
+  },
+  "motor_mapping": {
+    "waist": [12, 13, 14],
+    "left_arm": [15, 16, 17, 18, 19, 20, 21],
+    "right_arm": [22, 23, 24, 25, 26, 27, 28],
+    "ownership_weight": 29,
+    "legs_owned_by_native_locomotion": [0, 11]
+  },
+  "waist": {
+    "kp": [80, 80, 120],
+    "kd": 1.5,
+    "waist_pitch_static_bias_rad": 0.01
+  },
+  "arms": {
+    "lock_kp": 40,
+    "drag_shoulder_elbow_kp": 8,
+    "drag_wrist_kp": 6,
+    "kd": 1.5,
+    "tau_ff": 0,
+    "follow_rate": 0.25,
+    "follow_threshold_rad": 0.015
+  },
+  "golden": {
+    "ownership_weight": 1.0,
+    "acquire_s": 2.0,
+    "release_s": 2.0,
+    "first_frame_q_source": "rt/lowstate"
+  },
+  "joint_limits": {
+    "source": "/home/hebe/unitree_workspace/unitree_ros/robots/g1_description/g1_29dof.urdf",
+    "reference_only_verify_against_actual_robot_revision": true
+  }
+}
