@@ -13,8 +13,13 @@ add_library(g1_arm_core STATIC
   src/arm_sdk_controller.cpp
   src/waist_hold.cpp
   src/trajectory.cpp
+  src/continuous_trajectory.cpp
+  src/trajectory_processor.cpp
+  src/trajectory_retimer.cpp
+  src/feedback_replay_controller.cpp
   src/recorder.cpp
   src/logger.cpp
+  src/stability_gate.cpp
 )
 target_include_directories(g1_arm_core PUBLIC include)
 target_link_libraries(g1_arm_core PUBLIC unitree_sdk2 JsonCpp::JsonCpp Threads::Threads)

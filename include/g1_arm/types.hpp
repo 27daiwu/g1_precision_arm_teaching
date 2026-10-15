@@ -17,8 +17,27 @@ using Clock = std::chrono::steady_clock;
 struct State {
   std::array<double, 35> q{};
   std::array<double, 35> dq{};
+  std::array<double, 3> imu_gyro{};
+  std::array<double, 3> imu_quaternion{};
   std::uint8_t mode_machine{};
   Clock::time_point received_at{};
+};
+
+struct StabilityConfig {
+  double window_s{1.0};
+  double wait_timeout_s{10.0};
+  double filter_tau_s{0.20};
+  double gyro_limit_rad_s{0.30};
+  double waist_dq_limit_rad_s{0.15};
+  double leg_dq_rms_limit_rad_s{0.30};
+  double leg_dq_peak_limit_rad_s{0.80};
+};
+
+struct StabilityMetrics {
+  double gyro_rad_s{0.0};
+  double waist_dq_rad_s{0.0};
+  double leg_dq_rms_rad_s{0.0};
+  double leg_dq_peak_rad_s{0.0};
 };
 
 struct Point {

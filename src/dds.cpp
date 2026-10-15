@@ -30,12 +30,20 @@ public:
         state.q[i] = copy.motor_state()[i].q();
         state.dq[i] = copy.motor_state()[i].dq();
       }
+      for (std::size_t axis = 0; axis < state.imu_gyro.size(); ++axis)
+        state.imu_gyro[axis] = copy.imu_state().gyroscope()[axis];
+      for (std::size_t axis = 0; axis < state.imu_quaternion.size(); ++axis)
+        state.imu_quaternion[axis] = copy.imu_state().quaternion()[axis];
       state.mode_machine = copy.mode_machine();
       state.received_at = Clock::now();
       std::lock_guard<std::mutex> guard(state_mutex_);
       latest_ = state;
       have_state_ = true;
     }, 1);
+  }
+
+  void activate_publisher() override {
+    if (publisher_) return;
     publisher_ = std::make_unique<unitree::robot::ChannelPublisher<LowCmd>>(
         "rt/arm_sdk");
     publisher_->InitChannel();

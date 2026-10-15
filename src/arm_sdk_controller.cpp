@@ -29,7 +29,7 @@ void ArmSdkController::start(const std::string &interface) {
   dds_->initialize(interface);
   started_ = true;
   waist_logger_ = std::make_unique<Logger>(log_directory_);
-  log_.open(log_directory_ / ("g1_commands_" + timestamp_local() + ".csv"));
+  log_.open(log_directory_ / ("g1_commands_" + timestamp_filename_local() + ".csv"));
   if (!log_) throw std::runtime_error("cannot create command log");
   log_ << "timestamp,mode,weight";
   for (int motor = 12; motor <= 28; ++motor)
@@ -62,6 +62,64 @@ State ArmSdkController::latest() const {
   return state;
 }
 
+State ArmSdkController::wait_stable(const StabilityConfig &config) {
+  if (!started_ || acquired_ || attempted_write_)
+    throw std::runtime_error("WAIT_STABLE must run before Arm SDK acquire");
+  StabilityGate gate(config);
+  const double timeout_s = std::min(wait_timeout_s_, config.wait_timeout_s);
+  const auto started = Clock::now();
+  auto last_report = Clock::time_point{};
+  bool waiting_reported = false;
+  while (true) {
+    if (g_stop_requested) throw std::runtime_error("operator stop requested during WAIT_STABLE");
+    const State state = dds_->latest();
+    for (int motor = 0; motor <= 28; ++motor) {
+      if (!std::isfinite(state.q[motor]) || !std::isfinite(state.dq[motor]))
+        throw std::runtime_error("invalid LowState motor " + std::to_string(motor) +
+                                 " during WAIT_STABLE");
+    }
+    const auto metrics = gate.observe(state);
+    stability_metrics_ = metrics;
+    if (!waiting_reported) {
+      std::cout << "WAIT_STABLE\nWaiting for robot to stabilize..." << std::flush;
+      if (waist_logger_) waist_logger_->event("WAIT_STABLE", state, metrics);
+      waiting_reported = true;
+    }
+    const auto now = Clock::now();
+    if (now - last_report >= std::chrono::milliseconds(250)) {
+      last_report = now;
+      std::cout << "\rWaiting for robot to stabilize... "
+                << "gyro=" << metrics.gyro_rad_s << " waist_dq=" << metrics.waist_dq_rad_s
+                << " leg_rms=" << metrics.leg_dq_rms_rad_s
+                << " leg_peak=" << metrics.leg_dq_peak_rad_s
+                << " stable=" << gate.stable_duration_s(now) << "s" << std::flush;
+    }
+    if (gate.stable() && gate.stable_duration_s(now) >= config.window_s) {
+      // Use the newest valid feedback frame, never the filtered window average.
+      const State candidate = dds_->latest();
+      for (int motor = 0; motor <= 28; ++motor) {
+        if (!std::isfinite(candidate.q[motor]) || !std::isfinite(candidate.dq[motor]))
+          throw std::runtime_error("invalid latest LowState at stable confirmation");
+      }
+      const auto confirmed = gate.observe(candidate);
+      stability_metrics_ = confirmed;
+      if (!gate.stable() || gate.stable_duration_s(candidate.received_at) < config.window_s)
+        continue;
+      stable_state_ = candidate;
+      has_stable_state_ = true;
+      std::cout << "\nSTABLE_CONFIRMED\n";
+      if (waist_logger_) waist_logger_->event("STABLE_CONFIRMED", stable_state_, confirmed);
+      return stable_state_;
+    }
+    if (std::chrono::duration<double>(now - started).count() >= timeout_s) {
+      std::cout << "\nRobot did not stabilize within " << timeout_s
+                << " seconds. Check stance and try again.\n";
+      throw std::runtime_error("WAIT_STABLE timeout; no Arm SDK commands were published");
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+}
+
 void ArmSdkController::wait_period(Clock::time_point &deadline) const {
   deadline += std::chrono::milliseconds(20);
   std::this_thread::sleep_until(deadline);
@@ -73,17 +131,22 @@ void ArmSdkController::wait_period(Clock::time_point &deadline) const {
 
 void ArmSdkController::acquire() {
   if (!started_ || acquired_) throw std::runtime_error("acquire not allowed");
-  const auto state = latest();
+  if (!has_stable_state_)
+    throw std::runtime_error("WAIT_STABLE must complete before acquire");
+  const auto state = stable_state_;
   mode_machine_ = state.mode_machine;
   for (std::size_t i = 0; i < captured_arm_.size(); ++i)
     captured_arm_[i] = state.q[15 + i];
   waist_.capture(state);
   if (!waist_logger_)
     waist_logger_ = std::make_unique<Logger>(log_directory_);
+  waist_logger_->event("ACQUIRE_START", state, stability_metrics_, captured_arm_,
+                       waist_.reference(), waist_.max_abs_error());
   const auto arm = captured_arm_;
   // Golden semantics: first ownership frame keeps measured q and carries weight=1.
   attempted_write_ = true;
   weight_ = 1.0;
+  dds_->activate_publisher();
   send(arm, TeachMode::Lock, 1.0, 0.0);
   acquired_ = true;
   Clock::time_point deadline = Clock::now();
@@ -197,6 +260,13 @@ void ArmSdkController::release() noexcept {
     try { send(hold, last_kp_, 0.0, 0.0); } catch (...) {}
   }
   acquired_ = false;
+  if (waist_logger_) {
+    try {
+      const auto state = dds_->latest();
+      waist_logger_->event("RELEASE_COMPLETE", state, stability_metrics_, last_command_,
+                           waist_.reference(), waist_.max_abs_error());
+    } catch (...) {}
+  }
 }
 
 void ArmSdkController::close() noexcept {

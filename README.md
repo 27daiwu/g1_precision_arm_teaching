@@ -26,18 +26,22 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
 ## Record
 
 ```sh
-./build/g1_record my_track --interface eth0
+./build/g1_record my_track --interface eth0 --wait-timeout 10
 ```
 
 Commands are line based:
 
 - `F`: toggle DRAG and LOCK.
 - `M`: capture the measured 14-joint pose, record the next point, and enter LOCK.
+- `C`: start/stop continuous q/dq capture; starting is accepted only in DRAG.
+  The mode is unchanged when stopping. The terminal shows `RECORDING` or
+  `RECORD_STOPPED`, frame count, and elapsed duration while capture is active.
 - `L`: list points and joint angles.
 - `R B`: replace point B with the current measured pose and enter LOCK.
 - `D B`: delete point B.
 - `N new_name`: rename the trajectory.
-- `S`: save to `trajectories/my_track.json`, then release.
+- `S`: save point data to `trajectories/my_track.json` and continuous data, if
+  present, to `trajectories/my_track_continuous.json`, then release.
 - `Q`: discard unsaved edits, then release.
 
 ## Replay
@@ -47,12 +51,47 @@ Commands are line based:
 ./build/g1_replay my_track --preview
 ./build/g1_replay my_track --interface eth0 --cycles 3 --hold 2
 ./build/g1_replay my_track --interface eth0 --forever --speed 0.5
+./build/g1_replay my_track --continuous --preview
+./build/g1_replay my_track --continuous --interface eth0 --cycles 1 \
+  --speed-scale 0.25 --motion-scale 1.0
+./build/g1_replay my_track --continuous --high-precision \
+  --interface eth0 --cycles 1 --speed-scale 0.25 \
+  --position-tolerance 0.02 --node-timeout 5
 ```
+
+Before either command takes Arm SDK ownership, it waits for a 1 second stable
+motion window. `--wait-timeout SEC` changes the default 10 second read-only wait.
+On timeout the program exits without creating an Arm SDK publisher.
 
 `--hold` overrides the hold at every point. Without it, each point's `hold_s`
 is used. `--speed` is the maximum joint-space speed in rad/s. Replay first
 moves smoothly from the measured pose to A, then follows saved point order,
 including the final point back to A. `--dir` changes the trajectory directory.
+
+Continuous capture uses a separate version 1 JSON schema with motor IDs 15-28,
+the captured start pose, and per-frame monotonic relative time plus measured q
+and dq. `--continuous` selects this format without changing point JSON handling.
+Relative replay anchors the recording's initial pose at the live measured pose
+captured by WAIT_STABLE/Golden acquire, interpolates using saved timestamps, and
+scales elapsed playback time by `--speed-scale` (default 0.25) and displacement
+by `--motion-scale` (default 1.0). Each completed cycle returns smoothly to its
+relative zero pose before repeating. Waist hold remains independent of arm data.
+
+Adding `--high-precision` selects feedback-driven path progression while leaving
+the original continuous replay as the baseline. The processor preserves the
+shared 14-joint path with piecewise linear, no-overshoot resampling, retains
+detected turning/pause points, writes `<name>_processed.json`, and rejects
+geometric deviation above its 0.01 rad default bound. The retimer uses shared
+progress, a 0.7 rad/s joint velocity limit, 1.5 rad/s^2 joint acceleration
+limit, and the selected speed scale. Feedback uses 0.04 rad normal and 0.15 rad
+pause error thresholds with a 0.12 s low-pass filter. Important nodes require
+position error <= `--position-tolerance` (default 0.02 rad), dq <= 0.04 rad/s,
+and 0.20 s stable feedback. `--node-timeout` defaults to 5 s; failure logs
+`NOT_REACHED` and ends replay through the shared release path. Runtime feedback
+CSV is written as `logs/g1_high_precision_<local-time>.csv`; node outcomes and
+per-joint node errors are appended as comments in the same file. Each cycle
+plays the forward path and then feedback-controls a smooth return to its relative
+zero pose. Ctrl+C uses the existing controller release path.
 
 ## Control values
 
@@ -76,6 +115,19 @@ including the final point back to A. `--dir` changes the trajectory directory.
 the release path. Release sends a 2 second smooth weight reduction and a final
 weight 0 frame. CSV logs are written under `logs/`, including waist measured q,
 dq, reference, and maximum absolute reference error.
+Log filenames use local wall time, for example `g1_arm_2026-10-14_15-30-00-123.csv`.
+The paired JSONL event log records `WAIT_STABLE`, `STABLE_CONFIRMED`,
+`ACQUIRE_START`, and `RELEASE_COMPLETE` with filtered motion indicators and
+the exact captured references.
+
+The initial stability limits are filtered roll/pitch gyro magnitude <= 0.30
+rad/s, max waist motor dq <= 0.15 rad/s, leg motor dq RMS <= 0.30 rad/s, and
+leg motor dq peak <= 0.80 rad/s. A 0.20 second low-pass filter is applied before
+requiring the full 1 second window. The archived field logs do not contain raw
+LowState IMU/leg dq samples, so these thresholds should be evaluated from the
+new JSONL event logs during the first supervised field tests. A brief filtered
+limit excursion is tolerated; three consecutive over-limit samples reset the
+continuous window.
 
 The program requires exclusive ownership of the robot's Arm SDK channel. Keep
 the native locomotion controller responsible for the legs. No real-robot test

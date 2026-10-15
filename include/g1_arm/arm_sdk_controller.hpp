@@ -3,6 +3,7 @@
 #include "g1_arm/dds.hpp"
 #include "g1_arm/waist_hold.hpp"
 #include "g1_arm/logger.hpp"
+#include "g1_arm/stability_gate.hpp"
 #include <atomic>
 #include <fstream>
 #include <memory>
@@ -15,6 +16,8 @@ public:
   ~ArmSdkController();
   void start(const std::string &interface);
   State latest() const;
+  State wait_stable(const StabilityConfig &config = {});
+  void set_wait_timeout(double timeout_s) { wait_timeout_s_ = timeout_s; }
   void acquire();
   void publish(const ArmQ &q, TeachMode mode, double weight = 1.0);
   void publish(const ArmQ &q, const std::array<double, 14> &kp,
@@ -52,5 +55,9 @@ private:
   ArmQ last_command_{};
   TeachMode last_mode_{TeachMode::Lock};
   std::array<double, 14> last_kp_{};
+  double wait_timeout_s_{10.0};
+  State stable_state_{};
+  bool has_stable_state_{false};
+  StabilityMetrics stability_metrics_{};
 };
 } // namespace g1_arm

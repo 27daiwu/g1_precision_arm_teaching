@@ -10,6 +10,7 @@ class Dds {
 public:
   virtual ~Dds() = default;
   virtual void initialize(const std::string &interface) = 0;
+  virtual void activate_publisher() = 0;
   virtual State latest() const = 0;
   virtual bool publish(const ControlFrame &frame, std::string &error) = 0;
   virtual void close() noexcept = 0;

@@ -9,6 +9,7 @@ void validate_trajectory(const Trajectory &trajectory);
 void set_point(Trajectory &trajectory, const Point &point);
 void delete_point(Trajectory &trajectory, const std::string &name);
 std::string timestamp_local();
+std::string timestamp_filename_local();
 std::filesystem::path trajectory_path(const std::filesystem::path &directory,
                                       const std::string &name);
 Trajectory load_trajectory(const std::filesystem::path &path);
