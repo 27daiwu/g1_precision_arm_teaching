@@ -1,6 +1,7 @@
 #include "g1_arm/logger.hpp"
 
 #include "g1_arm/trajectory.hpp"
+#include <algorithm>
 #include <stdexcept>
 
 namespace g1_arm {
@@ -14,7 +15,8 @@ Logger::Logger(const std::filesystem::path &directory) {
   }
   stream_.open(path_);
   if (!stream_) throw std::runtime_error("cannot create control log " + path_.string());
-  stream_ << "timestamp,motor,q,dq,q_ref,max_abs_error\n";
+  stream_ << "timestamp,motor,q,dq,q_ref,max_abs_error,waist_pitch_extra_bias_rad,"
+             "acquire_progress,release_progress,tracking_error_rad\n";
   events_path_ = directory / ("g1_arm_events_" + stamp + ".jsonl");
   events_stream_.open(events_path_);
   if (!events_stream_) throw std::runtime_error("cannot create event log " + events_path_.string());
@@ -49,13 +51,18 @@ void Logger::event(const std::string &name, const State &state,
   events_stream_ << "}\n";
   events_stream_.flush();
 }
-void Logger::waist(const State &state, const WaistQ &reference,
-                   const WaistQ &max_abs_error) {
+void Logger::waist(const State &state, const WaistQ &max_abs_error,
+                   double extra_pitch_bias,
+                   double acquire_progress, double release_progress,
+                   const WaistQ &commanded_reference) {
   const auto now = timestamp_local();
   for (std::size_t i = 0; i < 3; ++i)
     stream_ << now << ',' << 12 + i << ',' << state.q[12 + i] << ','
-            << state.dq[12 + i] << ',' << reference[i] + (i == 2 ? .010 : 0.0)
-            << ',' << max_abs_error[i] << '\n';
+            << state.dq[12 + i] << ',' << commanded_reference[i]
+            << ',' << max_abs_error[i] << ',' << (i == 2 ? extra_pitch_bias : 0.0)
+            << ',' << acquire_progress << ',' << release_progress << ','
+            << (commanded_reference[i] - state.q[12 + i])
+            << '\n';
   stream_.flush();
 }
 } // namespace g1_arm

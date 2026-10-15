@@ -23,6 +23,7 @@ struct Options {
   double motion_scale{1.0};
   double position_tolerance{.02};
   double node_timeout{5.0};
+  double waist_pitch_extra_bias{0.0};
   bool forever{false};
   bool preview{false};
   bool list{false};
@@ -43,6 +44,8 @@ Options parse(int argc, char **argv) {
     else if (arg == "--position-tolerance" && i + 1 < argc) options.position_tolerance = std::stod(argv[++i]);
     else if (arg == "--node-timeout" && i + 1 < argc) options.node_timeout = std::stod(argv[++i]);
     else if (arg == "--wait-timeout" && i + 1 < argc) options.wait_timeout_s = std::stod(argv[++i]);
+    else if (arg == "--waist-pitch-extra-bias" && i + 1 < argc)
+      options.waist_pitch_extra_bias = std::stod(argv[++i]);
     else if (arg == "--forever") options.forever = true;
     else if (arg == "--preview") options.preview = true;
     else if (arg == "--list") options.list = true;
@@ -52,7 +55,7 @@ Options parse(int argc, char **argv) {
       std::cout << "Usage: g1_replay NAME [--continuous] [--high-precision] [--interface eth0] [--cycles N|--forever] "
                    "[--hold SEC] [--speed RAD_PER_SEC] [--speed-scale 0.25] "
                    "[--motion-scale 1.0] [--position-tolerance 0.02] [--node-timeout 5] "
-                   "[--wait-timeout SEC] [--preview]\n";
+                   "[--wait-timeout SEC] [--waist-pitch-extra-bias RAD] [--preview]\n";
       std::exit(0);
     } else if (!arg.empty() && arg[0] != '-' && options.name.empty()) options.name = arg;
     else throw std::runtime_error("invalid argument: " + arg);
@@ -76,6 +79,9 @@ Options parse(int argc, char **argv) {
   if (!options.preview && options.interface.empty()) throw std::runtime_error("--interface is required");
   if (!std::isfinite(options.wait_timeout_s) || options.wait_timeout_s <= 0.0)
     throw std::runtime_error("wait timeout must be positive");
+  if (!std::isfinite(options.waist_pitch_extra_bias) ||
+      std::abs(options.waist_pitch_extra_bias) > kMaxWaistPitchExtraBiasRad)
+    throw std::runtime_error("waist pitch extra bias must be finite and within +/-0.050 rad");
   return options;
 }
 void move(ArmSdkController &controller, const ArmQ &from, const ArmQ &to,
@@ -143,7 +149,8 @@ int main(int argc, char **argv) {
       const double duration = trajectory.samples.back().t_s;
       std::cout << trajectory.name << " continuous " << trajectory.samples.size()
                 << " frames, duration=" << duration << "s, speed_scale="
-                << options.speed_scale << ", motion_scale=" << options.motion_scale << '\n';
+                << options.speed_scale << ", motion_scale=" << options.motion_scale
+                << ", motor14_extra_bias=" << options.waist_pitch_extra_bias << "rad\n";
       ProcessedTrajectory processed;
       if (options.high_precision) {
         processed = process_trajectory(trajectory);
@@ -160,6 +167,8 @@ int main(int argc, char **argv) {
       if (options.preview) return 0;
       ArmSdkController controller(make_unitree_dds());
       controller.set_wait_timeout(options.wait_timeout_s);
+      controller.set_waist_pitch_extra_bias(options.waist_pitch_extra_bias);
+      std::cout << "motor14 extra pitch bias=" << options.waist_pitch_extra_bias << " rad\n";
       controller.start(options.interface);
       const State stable_state = controller.wait_stable();
       controller.acquire();
@@ -329,6 +338,8 @@ int main(int argc, char **argv) {
     if (options.preview) return 0;
     ArmSdkController controller(make_unitree_dds());
     controller.set_wait_timeout(options.wait_timeout_s);
+    controller.set_waist_pitch_extra_bias(options.waist_pitch_extra_bias);
+    std::cout << "motor14 extra pitch bias=" << options.waist_pitch_extra_bias << " rad\n";
     controller.start(options.interface);
     const auto stable_state = controller.wait_stable();
     controller.acquire();

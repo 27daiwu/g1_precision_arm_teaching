@@ -9,8 +9,10 @@ namespace g1_arm {
 class Logger {
 public:
   explicit Logger(const std::filesystem::path &directory);
-  void waist(const State &state, const WaistQ &reference,
-             const WaistQ &max_abs_error);
+  void waist(const State &state, const WaistQ &max_abs_error,
+             double extra_pitch_bias,
+             double acquire_progress, double release_progress,
+             const WaistQ &commanded_reference);
   void event(const std::string &name, const State &state,
              const StabilityMetrics &metrics,
              const std::optional<ArmQ> &arm_reference = std::nullopt,

@@ -24,6 +24,23 @@ ArmSdkController::ArmSdkController(std::unique_ptr<Dds> dds,
 
 ArmSdkController::~ArmSdkController() { close(); }
 
+void ArmSdkController::set_waist_pitch_extra_bias(double bias_rad) {
+  if (!std::isfinite(bias_rad) || std::abs(bias_rad) > kMaxWaistPitchExtraBiasRad)
+    throw std::runtime_error("waist pitch extra bias must be finite and within +/-0.050 rad");
+  if (attempted_write_ || acquired_)
+    throw std::runtime_error("waist pitch extra bias must be set before acquire");
+  waist_pitch_extra_bias_ = bias_rad;
+}
+
+void ArmSdkController::set_waist_reference_target(const WaistQ &target) {
+  if (attempted_write_ || acquired_)
+    throw std::runtime_error("waist reference target must be set before acquire");
+  for (double value : target)
+    if (!std::isfinite(value)) throw std::runtime_error("invalid waist reference target");
+  waist_reference_target_ = target;
+  has_waist_reference_target_ = true;
+}
+
 void ArmSdkController::start(const std::string &interface) {
   if (started_) throw std::runtime_error("controller already started");
   dds_->initialize(interface);
@@ -138,6 +155,7 @@ void ArmSdkController::acquire() {
   for (std::size_t i = 0; i < captured_arm_.size(); ++i)
     captured_arm_[i] = state.q[15 + i];
   waist_.capture(state);
+  if (has_waist_reference_target_) waist_.set_target(waist_reference_target_);
   if (!waist_logger_)
     waist_logger_ = std::make_unique<Logger>(log_directory_);
   waist_logger_->event("ACQUIRE_START", state, stability_metrics_, captured_arm_,
@@ -163,30 +181,38 @@ void ArmSdkController::acquire() {
 }
 
 void ArmSdkController::send(const ArmQ &q, TeachMode mode, double weight,
-                            double bias_progress) {
+                            double acquire_progress, double release_progress) {
   std::array<double, 14> kp{};
   for (std::size_t i = 0; i < kp.size(); ++i) {
     const bool shoulder_elbow = i == 0 || i == 1 || i == 2 || i == 3 ||
                                 i == 7 || i == 8 || i == 9 || i == 10;
     kp[i] = mode == TeachMode::Lock ? 40.0 : (shoulder_elbow ? 8.0 : 6.0);
   }
-  send(q, kp, weight, bias_progress);
+  send(q, kp, weight, acquire_progress, release_progress);
   last_mode_ = mode;
 }
 
 void ArmSdkController::send(const ArmQ &q, const std::array<double, 14> &kp,
-                            double weight, double bias_progress) {
+                            double weight, double acquire_progress, double release_progress) {
+  std::array<double, 14> kd{};
+  kd.fill(1.5);
+  send(q, kp, kd, weight, acquire_progress, release_progress);
+}
+
+void ArmSdkController::send(const ArmQ &q, const std::array<double, 14> &kp,
+                            const std::array<double, 14> &kd, double weight,
+                            double acquire_progress, double release_progress) {
   const auto state = latest();
-  waist_.observe(state);
+  waist_.observe(state, acquire_progress, release_progress, waist_pitch_extra_bias_);
   ControlFrame frame;
   for (int motor = 15; motor <= 28; ++motor) {
     const auto offset = static_cast<std::size_t>(motor - 15);
     frame.q[motor] = q[offset];
     frame.kp[motor] = kp[offset];
-    frame.kd[motor] = 1.5;
+    frame.kd[motor] = kd[offset];
   }
   frame.weight = weight;
-  frame = waist_.apply(frame, bias_progress, 0.0);
+  frame = waist_.apply(frame, acquire_progress, release_progress, waist_pitch_extra_bias_);
   for (int motor = 12; motor <= 28; ++motor) {
     if (!std::isfinite(frame.q[motor]) || !std::isfinite(frame.kp[motor]) ||
         !std::isfinite(frame.kd[motor]))
@@ -199,13 +225,19 @@ void ArmSdkController::send(const ArmQ &q, const std::array<double, 14> &kp,
   }
   last_command_ = q;
   last_kp_ = kp;
+  last_kd_ = kd;
   if (log_.is_open()) {
     std::lock_guard<std::mutex> guard(log_mutex_);
     log_ << timestamp_local() << ",TEACH," << weight;
     for (int motor = 12; motor <= 28; ++motor)
       log_ << ',' << state.q[motor] << ',' << state.dq[motor] << ',' << frame.q[motor];
     log_ << '\n';
-    waist_logger_->waist(state, waist_.reference(), waist_.max_abs_error());
+    WaistQ waist_command{};
+    for (std::size_t i = 0; i < waist_command.size(); ++i)
+      waist_command[i] = frame.q[12 + i];
+    waist_logger_->waist(state, waist_.max_abs_error(),
+                         waist_pitch_extra_bias_, acquire_progress, release_progress,
+                         waist_command);
   }
 }
 
@@ -228,6 +260,19 @@ void ArmSdkController::publish(const ArmQ &q, const std::array<double, 14> &kp,
   weight_ = weight;
 }
 
+void ArmSdkController::publish(const ArmQ &q, const std::array<double, 14> &kp,
+                               const std::array<double, 14> &kd, double weight) {
+  if (!acquired_ || released_) throw std::runtime_error("controller not acquired");
+  if (g_stop_requested) throw std::runtime_error("operator stop requested");
+  for (double value : kp)
+    if (!std::isfinite(value) || value < 6.0 || value > 40.0) throw std::runtime_error("invalid arm Kp");
+  for (double value : kd)
+    if (!std::isfinite(value) || value < 0.5 || value > 3.0) throw std::runtime_error("invalid arm Kd");
+  send(q, kp, kd, weight, 1.0);
+  last_mode_ = TeachMode::Lock;
+  weight_ = weight;
+}
+
 bool ArmSdkController::stop_requested() const { return g_stop_requested != 0; }
 
 void ArmSdkController::release() noexcept {
@@ -245,19 +290,19 @@ void ArmSdkController::release() noexcept {
       const double progress = smoothstep(elapsed / 2.0);
       const double remaining = 1.0 - progress;
       weight_ = start_weight * remaining;
-      send(hold, last_kp_, weight_, progress);
+      send(hold, last_kp_, last_kd_, weight_, 1.0, progress);
       if (deadline < Clock::now()) deadline = Clock::now();
     }
     weight_ = 0.0;
-    send(hold, last_kp_, 0.0, 0.0);
+    send(hold, last_kp_, last_kd_, 0.0, 1.0, 1.0);
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   } catch (const std::exception &error) {
     if (fault_.empty()) fault_ = error.what();
     try {
-      send(hold, last_kp_, 0.0, 0.0);
+      send(hold, last_kp_, last_kd_, 0.0, 1.0, 1.0);
     } catch (...) {}
   } catch (...) {
-    try { send(hold, last_kp_, 0.0, 0.0); } catch (...) {}
+    try { send(hold, last_kp_, last_kd_, 0.0, 1.0, 1.0); } catch (...) {}
   }
   acquired_ = false;
   if (waist_logger_) {

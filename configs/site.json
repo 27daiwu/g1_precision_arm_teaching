@@ -1,0 +1,13 @@
+{
+  "config_version": "1.0",
+  "paper": { "calibration_ref": null, "center_tcp": null },
+  "brush_rack": { "calibration_ref": null, "pen_pregrasp_pose": null, "pen_grasp_pose": null },
+  "brush_tcp": { "calibration_ref": null, "parameters": null },
+  "poses": {
+    "pen_pregrasp": "data/poses/pen_pregrasp.json",
+    "pen_grasp": "data/poses/pen_grasp.json",
+    "pen_retreat": "data/poses/pen_retreat.json",
+    "hover": "data/poses/hover.json"
+  },
+  "waist": { "pitch_extra_bias_rad": 0.05 }
+}

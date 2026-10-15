@@ -26,23 +26,25 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
 ## Record
 
 ```sh
-./build/g1_record my_track --interface eth0 --wait-timeout 10
+./build/g1_calligraphy_record 福
 ```
+
+`--interface` defaults to `eth0`. `--waist-pitch-extra-bias RAD` adds an offset
+to motor14 in the common waist hold command path. It defaults to +0.050 rad on
+top of the existing +0.010 rad baseline; the accepted extra-bias range is
+currently +/-0.050 rad.
+The extra offset ramps in during Golden acquire and out during release. Verify
+the direction on the robot with +0.005 rad before increasing it. Waist logs
+include the extra bias, motor14 reference and measured position, tracking error,
+and acquire/release progress.
 
 Commands are line based:
 
 - `F`: toggle DRAG and LOCK.
-- `M`: capture the measured 14-joint pose, record the next point, and enter LOCK.
-- `C`: start/stop continuous q/dq capture; starting is accepted only in DRAG.
-  The mode is unchanged when stopping. The terminal shows `RECORDING` or
-  `RECORD_STOPPED`, frame count, and elapsed duration while capture is active.
-- `L`: list points and joint angles.
-- `R B`: replace point B with the current measured pose and enter LOCK.
-- `D B`: delete point B.
-- `N new_name`: rename the trajectory.
-- `S`: save point data to `trajectories/my_track.json` and continuous data, if
-  present, to `trajectories/my_track_continuous.json`, then release.
-- `Q`: discard unsaved edits, then release.
+- `C`: start/stop whole-character 17-DoF q/dq capture; starting is accepted only in DRAG.
+- `L`: show recording status, duration, and frame count.
+- `S`: save a stopped character recording under `data/trajectories/calligraphy/`.
+- `Q`: release; an unsaved recording requires a second confirmation.
 
 ## Replay
 
@@ -58,6 +60,24 @@ Commands are line based:
   --interface eth0 --cycles 1 --speed-scale 0.25 \
   --position-tolerance 0.02 --node-timeout 5
 ```
+
+Calligraphy replay uses the Phase 1 17-DoF JSON directly:
+
+```sh
+./build/g1_calligraphy_replay --file data/trajectories/calligraphy/FU_2026_10_15_11_20_04_597.json --validate-only
+./build/g1_calligraphy_replay --file data/trajectories/calligraphy/FU_2026_10_15_11_20_04_597.json \
+  --interface eth0 --speed-scale 0.25 --waist-pitch-extra-bias 0.05 \
+  --allow-unknown-waist-metadata
+```
+
+The replay validates the complete 17-DoF file, but commands only arm motors
+15-28. Waist motors 12-14 remain under the shared fixed WaistHold. MOVE_TO_START
+is smoothed and speed-limited, then `READY_START` waits for Enter. The full
+timestamped path plays once; `HOLD_END` waits for Enter before Golden release.
+Files without recorded waist bias metadata report UNKNOWN and require an
+explicit override for execution. `--validate-only` never creates a DDS channel.
+Replay CSV logs include per-arm-joint target, measured angle, error, control rate,
+and state.
 
 Before either command takes Arm SDK ownership, it waits for a 1 second stable
 motion window. `--wait-timeout SEC` changes the default 10 second read-only wait.
@@ -103,7 +123,9 @@ zero pose. Ctrl+C uses the existing controller release path.
 - DRAG: shoulder/elbow Kp 8, wrist Kp 6, Kd 1.5, tau_ff 0. Measured-q follow
   updates a reference by 0.25 of the error when error exceeds 0.015 rad.
 - Waist: motor 12/13/14 Kp 80/80/120, Kd 1.5, tau_ff 0. Its reference is
-  captured once and never follows arm motion; motor 14 uses the static bias above.
+  captured once and never follows arm motion; motor 14 uses the static +0.010 rad
+  baseline plus the optional CLI bias. No BODY IMU posture outer loop runs in this
+  command path; IMU data is used for WAIT_STABLE only.
 - Joint sanity limits use the local G1 29-DoF URDF at
   `/home/hebe/unitree_workspace/unitree_ros/robots/g1_description/g1_29dof.urdf`.
   Confirm the model revision and field limits against the deployed robot before

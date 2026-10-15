@@ -18,10 +18,14 @@ public:
   State latest() const;
   State wait_stable(const StabilityConfig &config = {});
   void set_wait_timeout(double timeout_s) { wait_timeout_s_ = timeout_s; }
+  void set_waist_pitch_extra_bias(double bias_rad);
+  void set_waist_reference_target(const WaistQ &target);
   void acquire();
   void publish(const ArmQ &q, TeachMode mode, double weight = 1.0);
   void publish(const ArmQ &q, const std::array<double, 14> &kp,
                double weight = 1.0);
+  void publish(const ArmQ &q, const std::array<double, 14> &kp,
+               const std::array<double, 14> &kd, double weight = 1.0);
   void release() noexcept;
   void close() noexcept;
   bool acquired() const { return acquired_; }
@@ -33,9 +37,12 @@ public:
   const std::string &fault() const { return fault_; }
 private:
   void send(const ArmQ &q, TeachMode mode, double weight,
-            double bias_progress);
+            double acquire_progress, double release_progress = 0.0);
   void send(const ArmQ &q, const std::array<double, 14> &kp, double weight,
-            double bias_progress);
+            double acquire_progress, double release_progress = 0.0);
+  void send(const ArmQ &q, const std::array<double, 14> &kp,
+            const std::array<double, 14> &kd, double weight,
+            double acquire_progress, double release_progress = 0.0);
   void wait_period(Clock::time_point &deadline) const;
   std::unique_ptr<Dds> dds_;
   PublisherOwnership ownership_;
@@ -55,7 +62,11 @@ private:
   ArmQ last_command_{};
   TeachMode last_mode_{TeachMode::Lock};
   std::array<double, 14> last_kp_{};
+  std::array<double, 14> last_kd_{};
   double wait_timeout_s_{10.0};
+  double waist_pitch_extra_bias_{0.0};
+  WaistQ waist_reference_target_{};
+  bool has_waist_reference_target_{false};
   State stable_state_{};
   bool has_stable_state_{false};
   StabilityMetrics stability_metrics_{};

@@ -1,4 +1,5 @@
 #include "g1_arm/arm_sdk_controller.hpp"
+#include "g1_arm/calligraphy_trajectory.hpp"
 #include "g1_arm/continuous_trajectory.hpp"
 #include "g1_arm/recorder.hpp"
 #include "g1_arm/stability_gate.hpp"
@@ -10,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <json/json.h>
 #include <regex>
 #include <sstream>
 
@@ -272,6 +274,105 @@ int main() {
   capture.capture(capture_state, capture_start + std::chrono::milliseconds(40));
   assert(!capture.recording() && capture.trajectory().samples.size() == stopped_frames);
 
+  CalligraphyRecorder calligraphy;
+  State calligraphy_state;
+  for (int motor = 12; motor <= 28; ++motor) {
+    calligraphy_state.q[motor] = motor * .001;
+    calligraphy_state.dq[motor] = motor * .0001;
+  }
+  const auto calligraphy_start = Clock::now();
+  calligraphy.start(calligraphy_state, calligraphy_start, "2026-10-15T10:30:00+0800");
+  for (int frame = 1; frame <= 4; ++frame) {
+    calligraphy_state.q[12] += .001;
+    calligraphy.capture(calligraphy_state,
+                       calligraphy_start + std::chrono::milliseconds(20 * frame));
+  }
+  calligraphy.stop(calligraphy_state);
+  assert(!calligraphy.recording() && calligraphy.trajectory().samples.size() == 5);
+  assert(calligraphy.trajectory().samples.front().q[0] == .012);
+  assert(calligraphy.trajectory().samples.front().q[16] == .028);
+  assert(calligraphy.trajectory().samples.back().t_monotonic == .08);
+  assert(calligraphy.trajectory().sample_rate_actual == 50.0);
+  calligraphy.trajectory().character_name = "福";
+  calligraphy.trajectory().waist_pitch_extra_bias_known = true;
+  calligraphy.trajectory().waist_pitch_extra_bias = .05;
+  calligraphy.trajectory().effective_waist_control_mode = "WaistHold_fixed";
+  const auto calligraphy_path = calligraphy_trajectory_path(tmp, "福", "20261015_103000");
+  save_calligraphy_trajectory(calligraphy.trajectory(), calligraphy_path);
+  const auto calligraphy_loaded = load_calligraphy_trajectory(calligraphy_path);
+  assert(calligraphy_loaded.character_name == "福");
+  assert(calligraphy_loaded.samples.size() == 5);
+  assert(calligraphy_loaded.samples[2].q == calligraphy.trajectory().samples[2].q);
+  assert(calligraphy_loaded.samples[2].dq == calligraphy.trajectory().samples[2].dq);
+  assert(calligraphy_loaded.samples[2].t_monotonic == .04);
+  assert(calligraphy_loaded.waist_pitch_extra_bias_known);
+  assert(calligraphy_loaded.waist_pitch_extra_bias == .05);
+  assert(calligraphy_loaded.effective_waist_control_mode == "WaistHold_fixed");
+  const auto mapped_start = calligraphy_arm_position(calligraphy_loaded.samples.front().q);
+  assert(mapped_start[0] == calligraphy_loaded.samples.front().q[3]);
+  assert(mapped_start[13] == calligraphy_loaded.samples.front().q[16]);
+  const auto mapped_mid = interpolate_calligraphy_arm(calligraphy_loaded, .03);
+  for (std::size_t i = 0; i < kArmDof; ++i) {
+    const double expected = .5 * (calligraphy_loaded.samples[1].q[i + 3] +
+                                  calligraphy_loaded.samples[2].q[i + 3]);
+    assert(std::abs(mapped_mid[i] - expected) < 1e-12);
+  }
+  const auto mapped_end = interpolate_calligraphy_arm(calligraphy_loaded, 100.0);
+  assert(mapped_end[13] == calligraphy_loaded.samples.back().q[16]);
+  WaistQ waist_actual{calligraphy_loaded.samples.front().q[0],
+                      calligraphy_loaded.samples.front().q[1],
+                      calligraphy_loaded.samples.front().q[2]};
+  WaistQ waist_errors{};
+  assert(calligraphy_waist_matches(calligraphy_loaded, waist_actual, .04,
+                                   &waist_errors));
+  assert(std::abs(waist_errors[2]) < 1e-12);
+  auto unknown_metadata = calligraphy_loaded;
+  unknown_metadata.waist_pitch_extra_bias_known = false;
+  unknown_metadata.waist_pitch_extra_bias = 0.0;
+  assert(!calligraphy_waist_matches(unknown_metadata, waist_actual, .04));
+
+  Json::Value saved_root;
+  {
+    std::ifstream input(calligraphy_path);
+    Json::CharReaderBuilder builder;
+    std::string error;
+    const bool parsed_calligraphy = Json::parseFromStream(builder, input, &saved_root, &error);
+    assert(parsed_calligraphy);
+  }
+  Json::Value legacy_root(Json::objectValue);
+  legacy_root["Character"] = saved_root["Character"];
+  legacy_root["Motion"] = saved_root["Motion"];
+  Json::Value legacy_metadata(Json::objectValue);
+  legacy_metadata["recording_mode"] = "whole_character";
+  legacy_metadata["sample_rate_actual"] = 50.0;
+  legacy_metadata["start_time"] = "legacy";
+  legacy_root["Metadata"] = legacy_metadata;
+  const auto legacy_calligraphy_path = tmp / "legacy_calligraphy.json";
+  {
+    Json::StreamWriterBuilder builder;
+    std::ofstream output(legacy_calligraphy_path);
+    output << Json::writeString(builder, legacy_root);
+  }
+  const auto legacy_calligraphy = load_calligraphy_trajectory(legacy_calligraphy_path);
+  assert(!legacy_calligraphy.waist_pitch_extra_bias_known);
+  assert(legacy_calligraphy.effective_waist_control_mode == "UNKNOWN");
+
+  State waist_bias_state;
+  waist_bias_state.q[12] = .1;
+  waist_bias_state.q[13] = -.2;
+  waist_bias_state.q[14] = -.03;
+  WaistHold waist_bias_hold;
+  waist_bias_hold.capture(waist_bias_state);
+  ControlFrame waist_frame;
+  const auto full_bias = waist_bias_hold.apply(waist_frame, 1.0, 0.0, .05);
+  assert(std::abs(full_bias.q[12] - .1) < 1e-12);
+  assert(std::abs(full_bias.q[13] + .2) < 1e-12);
+  assert(std::abs(full_bias.q[14] - .03) < 1e-12);
+  const auto acquire_half = waist_bias_hold.apply(waist_frame, .5, 0.0, .05);
+  assert(std::abs(acquire_half.q[14]) < 1e-12);
+  const auto release_half = waist_bias_hold.apply(waist_frame, 1.0, .5, .05);
+  assert(std::abs(release_half.q[14]) < 1e-12);
+
   ArmQ initial{};
   initial.fill(.1);
   TeachState mode(initial);
@@ -296,6 +397,7 @@ int main() {
   auto mock = std::make_unique<MockDds>();
   auto *wire = mock.get();
   ArmSdkController controller(std::move(mock), tmp / "logs");
+  controller.set_waist_pitch_extra_bias(.005);
   controller.start("mock");
   controller.wait_stable(stable_config);
   assert(wire->frames.empty());
@@ -312,7 +414,7 @@ int main() {
   assert(wire->frames.size() > 10);
   assert(wire->frames[1].weight > 0.0 && wire->frames[1].weight < 1.0);
   assert(wire->frames[1].q[14] > wire->state.q[14]);
-  assert(wire->frames[1].q[14] < wire->state.q[14] + .010);
+  assert(wire->frames[1].q[14] < wire->state.q[14] + .015);
 
   ArmQ target{};
   for (std::size_t i = 0; i < target.size(); ++i) target[i] = wire->state.q[15 + i];
@@ -322,7 +424,7 @@ int main() {
   assert(wire->frames.back().kp[19] == 6.0);
   assert(wire->frames.back().kp[22] == 8.0);
   assert(wire->frames.back().kp[26] == 6.0);
-  assert(std::abs(wire->frames.back().q[14] - (wire->state.q[14] + .010)) < 1e-6);
+  assert(std::abs(wire->frames.back().q[14] - (wire->state.q[14] + .015)) < 1e-6);
   assert(std::abs(controller.waist_reference()[1] - wire->state.q[13]) < 1e-12);
   controller.publish(target, TeachMode::Lock);
   assert(wire->frames.back().kp[15] == 40.0 && wire->frames.back().kp[28] == 40.0);
@@ -351,6 +453,15 @@ int main() {
           text.find("RELEASE_COMPLETE") != std::string::npos &&
           text.find("arm_q_ref") != std::string::npos &&
           text.find("waist_max_abs_error") != std::string::npos;
+    } else if (entry.path().extension() == ".csv" && filename.find("g1_arm_") == 0) {
+      std::ifstream log(entry.path());
+      std::ostringstream content;
+      content << log.rdbuf();
+      const auto text = content.str();
+      event_records_complete = event_records_complete &&
+          text.find("waist_pitch_extra_bias_rad") != std::string::npos &&
+          text.find("acquire_progress") != std::string::npos &&
+          text.find("tracking_error_rad") != std::string::npos;
     }
   }
   assert(readable_filename && event_records_complete);

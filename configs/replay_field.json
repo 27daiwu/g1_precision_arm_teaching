@@ -1,0 +1,13 @@
+{
+  "config_version": "1.0",
+  "speed_scale": 0.25,
+  "move_to_start_duration_s": null,
+  "waist_pitch_extra_bias_rad": 0.05,
+  "shoulder_kp": 40.0,
+  "elbow_kp": 40.0,
+  "wrist_kp": 40.0,
+  "motor_kp": {},
+  "motor_kd": {},
+  "profile": "field_default",
+  "approved_ranges": { "kp": [6.0, 40.0], "kd": [0.5, 3.0], "speed_scale": [0.05, 1.0], "waist_bias_rad": [-0.05, 0.05] }
+}
