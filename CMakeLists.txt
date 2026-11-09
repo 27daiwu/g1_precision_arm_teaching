@@ -19,6 +19,7 @@ add_library(g1_arm_core STATIC
   src/trajectory_retimer.cpp
   src/feedback_replay_controller.cpp
   src/recorder.cpp
+  src/pose.cpp
   src/logger.cpp
   src/stability_gate.cpp
 )
@@ -36,7 +37,7 @@ add_executable(g1_calligraphy_replay apps/calligraphy_replay.cpp)
 target_link_libraries(g1_calligraphy_replay PRIVATE g1_arm_core)
 target_compile_options(g1_calligraphy_replay PRIVATE -Wall -Wextra -Wpedantic)
 add_executable(g1_calligraphy apps/g1_calligraphy.cpp)
-target_link_libraries(g1_calligraphy PRIVATE JsonCpp::JsonCpp)
+target_link_libraries(g1_calligraphy PRIVATE g1_arm_core)
 target_compile_options(g1_calligraphy PRIVATE -Wall -Wextra -Wpedantic)
 
 enable_testing()
@@ -59,3 +60,11 @@ add_test(NAME replay_bias_limit
 set_tests_properties(replay_bias_limit PROPERTIES WILL_FAIL TRUE)
 add_test(NAME calligraphy_replay_help COMMAND g1_calligraphy_replay --help)
 add_test(NAME unified_calligraphy_help COMMAND g1_calligraphy --help)
+add_executable(g1_pose_test tests/pose_test.cpp)
+target_link_libraries(g1_pose_test PRIVATE g1_arm_core)
+target_compile_options(g1_pose_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME pose_offline COMMAND g1_pose_test)
+add_test(NAME pose_record_help COMMAND g1_calligraphy pose record --help)
+add_test(NAME pose_invalid_mode
+  COMMAND g1_calligraphy_record test --read-only)
+set_tests_properties(pose_invalid_mode PROPERTIES WILL_FAIL TRUE)

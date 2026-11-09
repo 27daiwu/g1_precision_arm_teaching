@@ -51,6 +51,12 @@ std::array<double, N> parse_array(const Json::Value &value, const char *name) {
 }
 } // namespace
 
+void validate_joint_position(std::size_t motor, double q) {
+  if (motor < 12 || motor > 28)
+    throw std::runtime_error("joint position validation requires motor 12..28");
+  check_joint(motor, q);
+}
+
 void validate_name(const std::string &name) {
   static const std::regex valid("^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$");
   if (!std::regex_match(name, valid))

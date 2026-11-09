@@ -23,6 +23,101 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH=/home/hebe/unitree_workspace/unitree_sdk2/build
 ```
 
+## 点位录制：双臂 + 腰部固定动作
+
+点位录制每次保存一个姿态，包含腰部 3 轴和双臂 14 轴的**实测绝对关节角度**，
+无需先启动/停止连续轨迹。以下命令在项目根目录执行；网卡名请替换为实际连接机器人的网卡。
+
+**方式一：只读录制，适合另一个项目正在控制机器人时抓取点位。**
+
+```sh
+./build/g1_calligraphy pose record ready --interface eth0
+```
+
+此模式仅订阅 `rt/lowstate`，不创建 `rt/arm_sdk` 发布器、不接管、不调整腰部。
+通过现有控制程序摆好双臂和腰部，停稳后在本程序输入以下命令，**每行按回车**：
+
+```text
+L
+P
+P grasp
+P retreat
+Q
+```
+
+`L` 显示当前 17 轴的 q/dq；`P` 立即保存为启动时指定的 `ready`；
+`P grasp`、`P retreat` 分别保存输入命令时的当前姿态，因此应先移动到对应点位再输入。
+每个点位单独保存为 `data/poses/NAME.json`，无需再按 `S`。
+`P` 遇到同名文件会拒绝覆盖，明确输入 `R NAME` 才会替换；`R` 替换启动时的默认名称。
+`Q` 或 Ctrl+C 退出只读录制，不会停止另一个项目的控制程序。
+
+**方式二：本项目接管双臂，手动拖动示教。**
+
+```sh
+./build/g1_calligraphy pose teach ready --interface eth0
+```
+
+启动后等待稳定检测和接管完成，初始为 LOCK。
+输入 `F` + 回车进入 DRAG，手动移动双臂到位，停止移动后输入 `F` + 回车锁定，
+再输入 `L` 检查角度/速度，`P` 保存。也可直接在 DRAG 中停稳后用 `P NAME` 保存，
+继续移动并保存其他命名点位；最后 `Q` 渐出并释放控制权。
+此模式使用现有 `rt/arm_sdk` 控制接口，不应与另一个 Arm SDK 发布程序同时运行。
+
+**腰部在 teach 模式始终由 WaistHold 保持固定参考，F 只切换手臂，不能手动拖腰。**
+默认 motor14 控制目标包含 +0.010 rad 基线和 +0.050 rad 额外偏置；
+`--waist-pitch-extra-bias` 只调整额外偏置。录制不同腰部姿态时，使用只读录制，
+由已有腰部控制程序设置姿态。两种录制方式保存的腰部 q 都来自 LowState，
+不是启动参考值，也不会再次加减 bias。
+
+查看和自定义保存位置：
+
+```sh
+./build/g1_calligraphy pose list
+./build/g1_calligraphy pose show ready
+./build/g1_calligraphy pose record ready --interface eth0 --pose-dir ./my_poses
+./build/g1_calligraphy pose list --pose-dir ./my_poses
+./build/g1_calligraphy pose show ready --pose-dir ./my_poses
+```
+
+`--wait-timeout SEC` 设置只读模式等待首个反馈的超时，默认 10 秒。
+保存时拒绝缺失或超过 250 ms 的反馈、非有限 q/dq 及超出本项目 G1 关节限位的 q。
+点位不会自动等待停稳；先用 `L` 确认 dq 已接近 0，再保存固定动作。
+
+### 在另一个项目中复用
+
+JSON 保留原有 `schema_version: 1`、`pose_name`、`motor_indices`、`q` 字段，
+并补充 `joint_names`、`units: "rad"`、`dq`（rad/s）、反馈来源及腰部控制元数据。
+所有数组按同一顺序对应：
+
+| JSON 数组位置（从 0 开始） | motor 索引 | 关节组 |
+| --- | --- | --- |
+| 0–2 | 12–14 | 腰 yaw、roll、pitch |
+| 3–9 | 15–21 | 左臂肩 pitch/roll/yaw、肘、腕 roll/pitch/yaw |
+| 10–16 | 22–28 | 右臂，同左臂顺序 |
+
+另一个使用相同 Unitree SDK2 接口的工程应先检查 schema、单位、数组长度及电机映射，
+再按 `motor_indices` 将 `q` 写入其固定动作目标，例如（`pose` 为已解析的 JsonCpp 对象）：
+
+```cpp
+// target_q 为另一个工程中按 motor 索引存放的目标角度数组。
+for (Json::ArrayIndex i = 0; i < pose["motor_indices"].size(); ++i) {
+  const int motor = pose["motor_indices"][i].asInt();
+  target_q[motor] = pose["q"][i].asDouble();
+}
+```
+
+把这些绝对目标交给现有的接管、限速插值、持续发布、保持和释放流程。
+`dq` 供判断录制时是否静止，固定动作的目标速度通常设为 0，不需复现保存的 dq。
+motor29 是控制权权重，不在这 17 个角度里；不得将 q 数组直接从 motor0 开始填充。
+若复用本项目的 `ArmSdkController`，腰部目标应在 `acquire()` 前通过
+`set_waist_reference_target()` 设置；此路径直接使用腰部目标，不再叠加 pitch bias。
+只读录制无法得知外部控制器的腰部偏置，相关元数据为 null，不能据此推断实际偏置。
+
+点位文件与连续轨迹、旧 14 轴 point trajectory 的格式不同，不能直接交给
+`g1_replay` / `g1_calligraphy_replay`。这里提供姿态数据，不生成避障路径；
+多个点位的执行顺序、过渡时间和必要中间点由另一个工程定义。
+`data/` 默认被 Git 忽略，迁移时需单独复制 `data/poses/`。
+
 ## Record
 
 ```sh

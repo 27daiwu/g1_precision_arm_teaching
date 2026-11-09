@@ -1,3 +1,5 @@
+#include "g1_arm/pose.hpp"
+
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -9,8 +11,10 @@
 
 namespace {
 void usage() {
-  std::cout << "Usage: g1_calligraphy <pose teach|list|show|record|replay|validate|list|run> ...\n"
-               "  pose teach NAME [record options] | pose list | pose show NAME\n"
+  std::cout << "Usage: g1_calligraphy <pose|record|replay|validate|list|run> ...\n"
+               "  pose record NAME [--interface eth0] [--pose-dir data/poses] (read only)\n"
+               "  pose teach NAME [record options] (arm DRAG/LOCK, fixed waist)\n"
+               "  pose list [--pose-dir DIR] | pose show NAME [--pose-dir DIR]\n"
                "  record CHARACTER [record options]\n"
                "  replay CHARACTER [replay options]\n"
                "  validate FILE | list | run CHARACTER (integration reserved)\n";
@@ -34,20 +38,30 @@ int main(int argc, char **argv) {
     if (command == "pose") {
       if (argc < 3) { usage(); return 2; }
       const std::string action = argv[2];
-      if (action == "teach") {
-        if (argc < 4) throw std::runtime_error("pose teach requires NAME");
+      if (action == "--help") { usage(); return 0; }
+      if (action == "teach" || action == "record") {
+        if (argc < 4) throw std::runtime_error("pose " + action + " requires NAME");
+        if (std::string(argv[3]) == "--help") exec_binary("g1_calligraphy_record", {"--help"});
         std::vector<std::string> args{"--pose-teach", argv[3]};
+        if (action == "record") args.emplace_back("--read-only");
         for (int i = 4; i < argc; ++i) args.emplace_back(argv[i]);
         exec_binary("g1_calligraphy_record", std::move(args));
       }
-      const std::filesystem::path dir = "data/poses";
+      std::filesystem::path dir = "data/poses";
+      const bool show = action == "show";
+      if (show && argc < 4) throw std::runtime_error("pose show requires NAME");
+      for (int i = show ? 4 : 3; i < argc; ++i) {
+        if (std::string(argv[i]) == "--pose-dir" && i + 1 < argc) dir = argv[++i];
+        else throw std::runtime_error("invalid pose argument: " + std::string(argv[i]));
+      }
       if (action == "list") {
         if (!std::filesystem::exists(dir)) return 0;
         for (const auto &entry : std::filesystem::directory_iterator(dir))
           if (entry.path().extension() == ".json") std::cout << entry.path().stem().string() << '\n';
         return 0;
       }
-      if (action == "show" && argc == 4) {
+      if (show) {
+        g1_arm::validate_pose_name(argv[3]);
         const auto path = dir / (std::string(argv[3]) + ".json");
         Json::Value value; Json::CharReaderBuilder builder; std::string errors;
         std::ifstream input(path);
@@ -57,7 +71,7 @@ int main(int argc, char **argv) {
         std::cout << Json::writeString(writer, value) << '\n';
         return 0;
       }
-      throw std::runtime_error("pose action must be teach, list, or show");
+      throw std::runtime_error("pose action must be record, teach, list, or show");
     }
     if (command == "record") {
       if (argc < 3) throw std::runtime_error("record requires CHARACTER");

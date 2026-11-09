@@ -5,6 +5,7 @@
 
 namespace g1_arm {
 void validate_name(const std::string &name);
+void validate_joint_position(std::size_t motor, double q);
 void validate_trajectory(const Trajectory &trajectory);
 void set_point(Trajectory &trajectory, const Point &point);
 void delete_point(Trajectory &trajectory, const std::string &name);
